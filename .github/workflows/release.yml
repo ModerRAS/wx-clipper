@@ -62,8 +62,21 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
+      - name: Install musl C toolchain
+        if: contains(matrix.target, 'linux-musl')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
       - name: Build
-        run: cargo build --release --locked --target ${{ matrix.target }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          target="${{ matrix.target }}"
+          if [[ "$target" == *linux-musl* ]]; then
+            cc_key="CC_${target//-/_}"
+            export "${cc_key}=musl-gcc"
+          fi
+          cargo build --release --locked --target "$target"
       - name: Package
         shell: bash
         env:
