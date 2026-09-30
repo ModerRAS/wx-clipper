@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>公众号剪藏</title>
+<style>
+  :root {
+    color-scheme: light;
+    --bg: #f3f0ea;
+    --card: #fffdf9;
+    --ink: #221f1b;
+    --muted: #6f675e;
+    --line: #e2dbd1;
+    --accent: #1d6b4f;
+    --accent-ink: #f4fbf7;
+    --danger: #9c3b2e;
+    --shadow: 0 12px 40px rgba(60, 42, 20, 0.06);
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font: 16px/1.6 "Segoe UI", "PingFang SC", "Noto Sans SC", sans-serif;
+  }
+  main { max-width: 980px; margin: 0 auto; padding: 32px 20px 80px; }
+  header h1 { margin: 0; font-size: 2rem; letter-spacing: -0.03em; }
+  header p { margin: 8px 0 0; color: var(--muted); max-width: 40rem; }
+  .grid { display: grid; grid-template-columns: 1.3fr 0.7fr; gap: 16px; margin: 28px 0; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 18px; box-shadow: var(--shadow); }
+  label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 8px; }
+  input[type="url"] {
+    width: 100%;
+    height: 46px;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 0 12px;
+    font: inherit;
+    background: #fff;
+  }
+  input:focus-visible, button:focus-visible, a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .row { display: flex; gap: 10px; align-items: center; margin-top: 12px; flex-wrap: wrap; }
+  button, .button {
+    appearance: none;
+    border: 0;
+    background: var(--accent);
+    color: var(--accent-ink);
+    border-radius: 999px;
+    padding: 10px 16px;
+    font: inherit;
+    cursor: pointer;
+    text-decoration: none;
+    display: inline-flex;
+    align-items: center;
+  }
+  button.secondary, a.secondary { background: transparent; color: var(--ink); border: 1px solid var(--line); }
+  button:disabled { opacity: 0.6; cursor: progress; }
+  .check { display: flex; gap: 8px; align-items: center; color: var(--muted); font-size: 14px; }
+  .banner { margin-top: 12px; padding: 10px 12px; border-radius: 10px; background: #eef6f1; }
+  .banner.error { background: #fdecea; color: var(--danger); }
+  .steps { margin: 0; padding-left: 1.1rem; color: var(--muted); }
+  .steps a { color: var(--accent); }
+  h2 { margin: 8px 0 14px; font-size: 1.15rem; }
+  .empty, .status { color: var(--muted); }
+  article.clip { padding: 14px 0; border-top: 1px solid var(--line); }
+  article.clip:first-of-type { border-top: 0; padding-top: 0; }
+  article.clip h3 { margin: 0 0 4px; font-size: 1.05rem; }
+  article.clip .meta { color: var(--muted); font-size: 14px; }
+  article.clip .path { display: block; margin-top: 6px; color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; word-break: break-all; }
+  article.clip .actions { display: flex; gap: 12px; margin-top: 8px; }
+  article.clip .actions a, article.clip .actions button { background: none; color: var(--accent); padding: 0; border-radius: 0; }
+  @media (max-width: 800px) {
+    .grid { grid-template-columns: 1fr; }
+    main { padding-top: 20px; }
+  }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>公众号剪藏</h1>
+    <p>在浏览器打开一篇微信公众号文章，油猴脚本会把链接交给这台电脑。服务抓取正文和图片，写成 Markdown，放进本地目录。</p>
+  </header>
+  <div class="grid">
+    <section class="card">
+      <form id="clip-form">
+        <label for="url">文章链接</label>
+        <input id="url" name="url" type="url" required placeholder="https://mp.weixin.qq.com/s/……" autocomplete="off">
+        <div class="row">
+          <button id="submit" type="submit">剪藏这篇</button>
+          <label class="check"><input id="force" type="checkbox"> 已保存过也重新抓取</label>
+        </div>
+      </form>
+      <div id="banner" hidden></div>
+    </section>
+    <section class="card">
+      <h2>浏览器自动剪藏</h2>
+      <ol class="steps">
+        <li>安装 Tampermonkey 或 Violentmonkey。</li>
+        <li>打开 <a href="/wx-clipper.user.js">油猴脚本</a>，按提示安装。</li>
+        <li>之后打开 <code>mp.weixin.qq.com</code> 文章，右下角会出现剪藏状态。</li>
+      </ol>
+    </section>
+  </div>
+  <section class="card" id="list-card">
+    <h2>已保存</h2>
+    <div id="list" class="status">正在读取已保存的文章…</div>
+  </section>
+</main>
+<script>
+const form = document.querySelector("#clip-form");
+const urlInput = document.querySelector("#url");
+const forceInput = document.querySelector("#force");
+const submit = document.querySelector("#submit");
+const banner = document.querySelector("#banner");
+const list = document.querySelector("#list");
+
+function showBanner(text, isError) {
+  banner.hidden = false;
+  banner.textContent = text;
+  banner.className = isError ? "banner error" : "banner";
+}
+
+function safePreview(url) {
+  return typeof url === "string" && url.startsWith("/files/") ? url : "";
+}
+function safeSource(url) {
+  return typeof url === "string" && url.startsWith("https://mp.weixin.qq.com/") ? url : "";
+}
+
+function renderClips(clips) {
+  list.replaceChildren();
+  list.className = "";
+  if (!clips.length) {
+    const empty = document.createElement("p");
+    empty.className = "empty";
+    empty.textContent = "还没有文章。贴一条链接，或者装上油猴脚本后直接打开文章。";
+    list.append(empty);
+    return;
+  }
+  for (const clip of clips) {
+    const item = document.createElement("article");
+    item.className = "clip";
+    const title = document.createElement("h3");
+    title.textContent = clip.title || "未命名文章";
+    const meta = document.createElement("div");
+    meta.className = "meta";
+    const bits = [clip.account, clip.author, clip.published].filter(Boolean);
+    const images = clip.image_failed ? `${clip.image_count} 张图，${clip.image_failed} 张失败` : `${clip.image_count} 张图`;
+    meta.textContent = [...bits, images].join(" · ");
+    const path = document.createElement("code");
+    path.className = "path";
+    path.textContent = clip.markdown || "";
+    const actions = document.createElement("div");
+    actions.className = "actions";
+    const preview = safePreview(clip.preview_url);
+    if (preview) {
+      const link = document.createElement("a");
+      link.href = preview;
+      link.target = "_blank";
+      link.rel = "noreferrer";
+      link.textContent = "预览";
+      actions.append(link);
+    }
+    const source = safeSource(clip.source_url);
+    if (source) {
+      const link = document.createElement("a");
+      link.href = source;
+      link.target = "_blank";
+      link.rel = "noreferrer";
+      link.textContent = "原文";
+      actions.append(link);
+    }
+    item.append(title, meta, path, actions);
+    list.append(item);
+  }
+}
+
+async function loadClips() {
+  try {
+    const response = await fetch("/api/clips");
+    if (!response.ok) throw new Error("列表加载失败");
+    const data = await response.json();
+    renderClips(data.clips || []);
+  } catch (error) {
+    list.className = "status";
+    list.textContent = "列表加载失败。";
+  }
+}
+
+form.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const url = urlInput.value.trim();
+  if (!url) return;
+  submit.disabled = true;
+  showBanner("正在抓取正文和图片…", false);
+  try {
+    const response = await fetch("/api/clip", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url, force: forceInput.checked }),
+    });
+    let data = {};
+    try { data = await response.json(); } catch (_) {}
+    if (!response.ok || !data.ok) {
+      showBanner(data.message || "剪藏失败", true);
+      return;
+    }
+    const where = data.markdown ? `，文件在 ${data.markdown}` : "";
+    showBanner(`${data.message}：${data.title || "文章"}${where}`, false);
+    await loadClips();
+  } catch (error) {
+    showBanner("请求没有完成。", true);
+  } finally {
+    submit.disabled = false;
+  }
+});
+
+loadClips();
+</script>
+</body>
+</html>
