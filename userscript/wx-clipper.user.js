@@ -9,8 +9,8 @@
 // @grant        GM_xmlhttpRequest
 // @connect      127.0.0.1
 // @connect      localhost
-// @updateURL    http://127.0.0.1:17331/wx-clipper.user.js
-// @downloadURL  http://127.0.0.1:17331/wx-clipper.user.js
+// @updateURL    https://raw.githubusercontent.com/ModerRAS/wx-clipper/main/userscript/wx-clipper.user.js
+// @downloadURL  https://raw.githubusercontent.com/ModerRAS/wx-clipper/main/userscript/wx-clipper.user.js
 // ==/UserScript==
 
 (function () {

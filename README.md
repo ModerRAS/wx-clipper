@@ -35,6 +35,8 @@ clips/<日期>-<标题>-<id>/
 
 ## 运行
 
+没有 Rust 时，从 [Releases](https://github.com/ModerRAS/wx-clipper/releases) 下载对应系统的压缩包。Windows 解压后是 `wx-clipper.exe`，macOS 和 Linux 解压后是 `wx-clipper`。同页的 `SHA256SUMS` 用来核对文件。
+
 需要 Rust 1.88 或更新版本。目录里的 `rust-toolchain.toml` 会让 rustup 选用当前 stable。
 
 ```bash
@@ -60,7 +62,7 @@ cargo run --release -- serve --addr 127.0.0.1:17331 --output ~/notes/wechat
 ## 油猴脚本
 
 1. 浏览器安装 [Tampermonkey](https://www.tampermonkey.net/) 或 Violentmonkey。
-2. 服务启动后打开 [http://127.0.0.1:17331/wx-clipper.user.js](http://127.0.0.1:17331/wx-clipper.user.js)，按提示安装。脚本源文件在 `userscript/wx-clipper.user.js`。
+2. 打开 [wx-clipper.user.js](https://raw.githubusercontent.com/ModerRAS/wx-clipper/main/userscript/wx-clipper.user.js) 按提示安装。脚本之后从这条地址检查更新。源文件在 `userscript/wx-clipper.user.js`。服务已经启动时，也可以打开 [http://127.0.0.1:17331/wx-clipper.user.js](http://127.0.0.1:17331/wx-clipper.user.js)。
 3. 打开 `https://mp.weixin.qq.com/s/...` 文章。右下角出现「公众号剪藏」，成功后可以打开本地预览。
 
 脚本只匹配公众号文章页，并用 `GM_xmlhttpRequest` 访问本机，避免页面自身的跨域限制。服务只接受 `mp.weixin.qq.com` 的文章链接，图片只从微信图床下载。
