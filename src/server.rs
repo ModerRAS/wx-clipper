@@ -68,7 +68,12 @@ struct ClipListItem {
     preview_url: String,
 }
 
-pub async fn serve(addr: &str, output: PathBuf, origin: String) -> Result<(), std::io::Error> {
+pub async fn serve(
+    addr: &str,
+    output: PathBuf,
+    origin: String,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+) -> Result<(), std::io::Error> {
     tokio::fs::create_dir_all(&output).await?;
     let state = Arc::new(AppState {
         output: output.clone(),
@@ -91,7 +96,9 @@ pub async fn serve(addr: &str, output: PathBuf, origin: String) -> Result<(), st
         .layer(cors)
         .with_state(state);
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown)
+        .await
 }
 
 async fn home() -> Html<&'static str> {

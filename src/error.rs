@@ -2,11 +2,11 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum ClipError {
-    #[error("这不是一篇微信公众号文章链接")]
+    #[error("这不是支持的文章链接")]
     BadUrl,
     #[error("抓取失败：{0}")]
     Fetch(String),
-    #[error("微信返回了环境验证，服务器直接抓链接被拦住了")]
+    #[error("直接抓链接被拦住了，需要浏览器里已经打开的页面")]
     Blocked,
     #[error("页面里没有文章正文")]
     Empty,
