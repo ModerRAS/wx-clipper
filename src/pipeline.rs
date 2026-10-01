@@ -126,7 +126,7 @@ fn has_article(url: &url::Url, html: &str) -> bool {
     if is_zhihu_column(url) {
         crate::article::zhihu_has_body(html)
     } else {
-        html.contains("id=\"js_content\"") || html.contains("id='js_content'")
+        crate::article::wechat_has_body(html)
     }
 }
 

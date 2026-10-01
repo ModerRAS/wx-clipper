@@ -116,7 +116,7 @@ async fn get_html(client: &Client, url: &str, user_agent: &str) -> Result<String
 }
 
 fn has_article(html: &str) -> bool {
-    html.contains("id=\"js_content\"") || html.contains("id='js_content'")
+    crate::article::wechat_has_body(html)
 }
 
 fn is_zhihu_column_url(url: &str) -> bool {

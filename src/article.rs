@@ -7,11 +7,16 @@ use url::Url;
 
 static CREATE_TIME: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"create_time\s*=\s*["'](\d+)["']"#).expect("create_time regex"));
+static CREATE_TIME_TEXT: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"create_time\s*:\s*'(\d{4}-\d{2}-\d{2} \d{2}:\d{2})'").expect("create_time text")
+});
 static MSG_TITLE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"msg_title\s*=\s*'((?:\\'|[^'])*)'"#).expect("msg_title regex"));
 static NICKNAME: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"nickname\s*=\s*htmlDecode\("((?:\\.|[^"\\])*)"\)"#).expect("nickname regex")
 });
+static NICK_NAME: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"nick_name\s*:\s*'((?:\\'|[^'])*)'").expect("nick_name regex"));
 
 const CST: i32 = 8 * 3600;
 
@@ -176,15 +181,26 @@ pub fn zhihu_has_body(html: &str) -> bool {
         || html.contains("ztext RichText")
 }
 
+pub fn wechat_has_body(html: &str) -> bool {
+    has_js_content_id(html) || !picture_page_urls(html).is_empty()
+}
+
 pub fn looks_blocked(html: &str) -> bool {
-    let has_article = html.contains("id=\"js_content\"") || html.contains("id='js_content'");
+    let has_article = has_js_content_id(html);
     if has_article && (html.contains("activity-name") || html.contains("msg_title")) {
+        return false;
+    }
+    if !picture_page_urls(html).is_empty() {
         return false;
     }
     html.contains("环境异常")
         || html.contains("访问过于频繁")
         || html.contains("操作频繁")
         || html.contains("请完成验证")
+}
+
+fn has_js_content_id(html: &str) -> bool {
+    html.contains("id=\"js_content\"") || html.contains("id='js_content'")
 }
 
 pub fn parse_article(html: &str, source_url: &str) -> Result<Article, ParseError> {
@@ -195,56 +211,266 @@ pub fn parse_article(html: &str, source_url: &str) -> Result<Article, ParseError
         return Err(ParseError::Blocked);
     }
     let document = Html::parse_document(html);
-    let content_sel = Selector::parse("#js_content").expect("selector");
-    let content = document
-        .select(&content_sel)
+    if let Some(content) = document
+        .select(&Selector::parse("#js_content").expect("selector"))
         .next()
-        .ok_or(ParseError::NoContent)?;
+    {
+        let mut builder = Builder::default();
+        let body_html = serialize_preview(&mut builder, content);
+        let blocks = render_children_blocks(&mut builder, content);
+        let body_markdown = join_markdown(&blocks);
+        if !body_markdown.trim().is_empty() || !builder.images.is_empty() {
+            return Ok(finish_wechat(
+                &document,
+                html,
+                source_url,
+                body_markdown,
+                body_html,
+                builder.images,
+            ));
+        }
+    }
+    parse_picture_message(&document, html, source_url)
+}
 
-    let mut builder = Builder::default();
-    let body_html = serialize_preview(&mut builder, content);
-    let blocks = render_children_blocks(&mut builder, content);
-    let body_markdown = join_markdown(&blocks);
-    if body_markdown.trim().is_empty() && builder.images.is_empty() {
+fn parse_picture_message(
+    document: &Html,
+    html: &str,
+    source_url: &str,
+) -> Result<Article, ParseError> {
+    let urls = picture_page_urls(html);
+    if urls.is_empty() {
         return Err(ParseError::NoContent);
     }
+    let mut builder = Builder::default();
+    let mut blocks = Vec::new();
+    let mut body_html = String::new();
+    for url in urls {
+        let inline = builder.push_image(url, "图片".into());
+        if let Inline::Image { alt, path } = &inline {
+            body_html.push_str("<img src=\"");
+            body_html.push_str(&escape_html(path));
+            body_html.push_str("\" alt=\"");
+            body_html.push_str(&escape_html(alt));
+            body_html.push_str("\">");
+        }
+        blocks.push(Block::Paragraph(vec![inline]));
+    }
+    Ok(finish_wechat(
+        document,
+        html,
+        source_url,
+        join_markdown(&blocks),
+        body_html,
+        builder.images,
+    ))
+}
 
+fn finish_wechat(
+    document: &Html,
+    html: &str,
+    source_url: &str,
+    body_markdown: String,
+    body_html: String,
+    images: Vec<ImageAsset>,
+) -> Article {
     let mut title = coalesce([
-        select_text(&document, "#activity-name"),
-        nonempty(meta_content(&document, "og:title")),
+        select_text(document, "#activity-name"),
+        nonempty(meta_content(document, "og:title")),
         capture_js(html, &MSG_TITLE).map(|value| decode_js_string(&value)),
     ]);
     if title.is_empty() {
         title = "未命名文章".into();
     }
     let account = coalesce([
-        select_text(&document, "#js_name"),
+        select_text(document, "#js_name"),
         capture_js(html, &NICKNAME).map(|value| decode_js_string(&value)),
+        capture_js(html, &NICK_NAME).map(|value| decode_js_string(&value)),
     ]);
-    let author = select_text(&document, "#js_author_name").unwrap_or_default();
-    let published_cst = CREATE_TIME
-        .captures(html)
-        .and_then(|cap| cap.get(1))
-        .and_then(|m| m.as_str().parse::<i64>().ok())
-        .and_then(|ts| DateTime::<Utc>::from_timestamp(ts, 0))
-        .map(|ts| ts.with_timezone(&FixedOffset::east_opt(CST).expect("cst")));
-    let published_display = published_cst
-        .map(|ts| ts.format("%Y-%m-%d %H:%M:%S").to_string())
-        .unwrap_or_default();
-
-    Ok(Article {
+    let author = select_text(document, "#js_author_name").unwrap_or_default();
+    let (published_display, published_cst) = published_from_html(html);
+    Article {
         title,
         account,
         author,
         published_display,
         published_cst,
-        digest: meta_content(&document, "og:description"),
-        cover: meta_content(&document, "og:image"),
+        digest: meta_content(document, "og:description"),
+        cover: meta_content(document, "og:image"),
         source_url: source_url.to_string(),
         body_markdown,
         body_html,
-        images: builder.images,
-    })
+        images,
+    }
+}
+
+fn published_from_html(html: &str) -> (String, Option<DateTime<FixedOffset>>) {
+    if let Some(published) = CREATE_TIME
+        .captures(html)
+        .and_then(|cap| cap.get(1))
+        .and_then(|m| m.as_str().parse::<i64>().ok())
+        .and_then(|ts| DateTime::<Utc>::from_timestamp(ts, 0))
+        .map(|ts| ts.with_timezone(&FixedOffset::east_opt(CST).expect("cst")))
+    {
+        return (
+            published.format("%Y-%m-%d %H:%M:%S").to_string(),
+            Some(published),
+        );
+    }
+    let Some(text) = capture_js(html, &CREATE_TIME_TEXT) else {
+        return (String::new(), None);
+    };
+    let display = format!("{text}:00");
+    let parsed = DateTime::parse_from_str(&format!("{display} +0800"), "%Y-%m-%d %H:%M:%S %z")
+        .ok()
+        .map(|ts| ts.with_timezone(&FixedOffset::east_opt(CST).expect("cst")));
+    (display, parsed)
+}
+
+fn picture_page_urls(html: &str) -> Vec<String> {
+    let Some(start) = find_picture_list(html) else {
+        return Vec::new();
+    };
+    let mut scan = Scan {
+        html,
+        index: start + 1,
+    };
+    let mut urls = Vec::new();
+    let mut array_depth = 1i32;
+    let mut object_depth = 0i32;
+    while array_depth > 0 {
+        if object_depth == 1 && array_depth == 1 {
+            if let Some(key) = scan.peek_ident() {
+                scan.skip_ident();
+                scan.skip_ws();
+                if scan.consume(':') && key == "cdn_url" {
+                    scan.skip_ws();
+                    if let Some(raw) = scan.read_quoted() {
+                        if let Some(url) = normalize_img_url(&decode_js_string(&raw)) {
+                            if crate::urlutil::is_public_media_url(&url) {
+                                urls.push(url);
+                            }
+                        }
+                    }
+                }
+                continue;
+            }
+        }
+        let Some(ch) = scan.bump() else {
+            break;
+        };
+        match ch {
+            '\'' | '"' => {
+                scan.skip_string(ch);
+            }
+            '{' => object_depth += 1,
+            '}' => object_depth -= 1,
+            '[' => array_depth += 1,
+            ']' => array_depth -= 1,
+            _ => {}
+        }
+    }
+    urls
+}
+
+fn find_picture_list(html: &str) -> Option<usize> {
+    let mut from = 0;
+    while let Some(rel) = html[from..].find("picture_page_info_list") {
+        let at = from + rel + "picture_page_info_list".len();
+        let rest = html[at..].trim_start();
+        if let Some(after_colon) = rest.strip_prefix(':') {
+            if after_colon.trim_start().starts_with('[') {
+                return Some(at + html[at..].find('[')?);
+            }
+        }
+        from = at;
+    }
+    None
+}
+
+struct Scan<'a> {
+    html: &'a str,
+    index: usize,
+}
+
+impl Scan<'_> {
+    fn rest(&self) -> &str {
+        &self.html[self.index..]
+    }
+
+    fn bump(&mut self) -> Option<char> {
+        let ch = self.rest().chars().next()?;
+        self.index += ch.len_utf8();
+        Some(ch)
+    }
+
+    fn skip_ws(&mut self) {
+        while self.rest().starts_with(|ch: char| ch.is_whitespace()) {
+            self.bump();
+        }
+    }
+
+    fn consume(&mut self, expected: char) -> bool {
+        if self.rest().starts_with(expected) {
+            self.bump();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn peek_ident(&self) -> Option<String> {
+        let mut ident = String::new();
+        for ch in self.rest().chars() {
+            if ident.is_empty() && !(ch.is_ascii_alphabetic() || ch == '_') {
+                return None;
+            }
+            if ch.is_ascii_alphanumeric() || ch == '_' {
+                ident.push(ch);
+            } else {
+                break;
+            }
+        }
+        (!ident.is_empty()).then_some(ident)
+    }
+
+    fn skip_ident(&mut self) {
+        if let Some(ident) = self.peek_ident() {
+            self.index += ident.len();
+        }
+    }
+
+    fn read_quoted(&mut self) -> Option<String> {
+        let quote = self.rest().chars().next()?;
+        if quote != '\'' && quote != '"' {
+            return None;
+        }
+        self.bump();
+        let mut out = String::new();
+        while let Some(ch) = self.bump() {
+            if ch == '\\' {
+                if let Some(escaped) = self.bump() {
+                    out.push(escaped);
+                }
+                continue;
+            }
+            if ch == quote {
+                return Some(out);
+            }
+            out.push(ch);
+        }
+        None
+    }
+
+    fn skip_string(&mut self, quote: char) {
+        while let Some(ch) = self.bump() {
+            if ch == '\\' {
+                self.bump();
+            } else if ch == quote {
+                break;
+            }
+        }
+    }
 }
 
 fn parse_zhihu(html: &str, source_url: &str) -> Result<Article, ParseError> {
@@ -2576,5 +2802,75 @@ let x = 1;
         assert_eq!(article.title, "未命名文章");
         assert_eq!(article.body_markdown, "只有正文\n");
         assert!(article.published_display.is_empty());
+    }
+
+    #[test]
+    fn parses_wechat_picture_message() {
+        let html = r#"<html><head>
+<meta property="og:title" content="图片标题" />
+<meta property="og:image" content="https://mmbiz.qpic.cn/cover/0?wx_fmt=jpeg" />
+</head><body>
+<script>
+nick_name: '示例号',
+create_time: '2026-10-01 12:18',
+picture_page_info_list: [ {
+  cdn_url: 'https://mmbiz.qpic.cn/mmbiz_jpg/aaa/0?wx_fmt=jpeg',
+  cdn_url_1_1: 'https://mmbiz.qpic.cn/mmbiz_jpg/square/0?wx_fmt=jpeg',
+  share_cover: { cdn_url: 'https://mmbiz.qpic.cn/mmbiz_jpg/crop/0?wx_fmt=jpeg' },
+  watermark_info: { cdn_url: 'https://mmbiz.qpic.cn/mmbiz_jpg/mark/0?wx_fmt=png' }
+}, {
+  cdn_url: 'https://mmbiz.qpic.cn/mmbiz_jpg/bbb/0?wx_fmt=png'
+} ],
+picture_page_info_list: [ { cdn_url: 'https://mmbiz.qpic.cn/mmbiz_jpg/copy/0?wx_fmt=jpeg' } ]
+</script>
+</body></html>"#;
+        assert!(wechat_has_body(html));
+        let article = parse_article(html, "https://mp.weixin.qq.com/s/pic").unwrap();
+        assert_eq!(article.title, "图片标题");
+        assert_eq!(article.account, "示例号");
+        assert_eq!(article.published_display, "2026-10-01 12:18:00");
+        assert_eq!(
+            article.body_markdown,
+            "![图片](images/img-001.jpg)\n\n![图片](images/img-002.png)\n"
+        );
+        assert!(article.body_html.contains("src=\"images/img-001.jpg\""));
+        assert!(article.body_html.contains("src=\"images/img-002.png\""));
+        assert!(!article.body_markdown.contains("crop"));
+        assert!(!article.body_markdown.contains("mark"));
+        assert!(!article.body_markdown.contains("square"));
+        assert!(!article.body_markdown.contains("copy"));
+        assert_eq!(article.images.len(), 2);
+        assert!(article.cover.contains("cover"));
+    }
+
+    #[test]
+    fn js_content_ignores_picture_list() {
+        let html = r#"<div id="js_content"><p>普通正文</p></div>
+<script>picture_page_info_list: [{ cdn_url: 'https://mmbiz.qpic.cn/mmbiz_jpg/zzz/0?wx_fmt=jpeg' }]</script>"#;
+        let article = parse_article(html, "https://mp.weixin.qq.com/s/abc").unwrap();
+        assert_eq!(article.body_markdown, "普通正文\n");
+        assert!(article.images.is_empty());
+    }
+
+    #[test]
+    fn empty_js_content_uses_picture_list() {
+        let html = r#"<div id="js_content"></div>
+<script>
+请完成验证
+picture_page_info_list: [{ cdn_url: 'https://mmbiz.qpic.cn/mmbiz_jpg/aaa/0?wx_fmt=jpeg' }]
+</script>"#;
+        let article = parse_article(html, "https://mp.weixin.qq.com/s/pic").unwrap();
+        assert_eq!(article.body_markdown, "![图片](images/img-001.jpg)\n");
+    }
+
+    #[test]
+    fn picture_list_without_public_image_has_no_body() {
+        let html =
+            r#"<script>picture_page_info_list: [{ cdn_url: 'http://127.0.0.1/a.jpg' }]</script>"#;
+        assert!(!wechat_has_body(html));
+        assert!(matches!(
+            parse_article(html, "https://mp.weixin.qq.com/s/pic"),
+            Err(ParseError::NoContent)
+        ));
     }
 }
