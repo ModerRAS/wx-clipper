@@ -1,10 +1,11 @@
 // ==UserScript==
-// @name         微信公众号剪藏
+// @name         文章剪藏
 // @namespace    wx-clipper
-// @version      0.1.0
-// @description  打开公众号文章时，把链接发给本地剪藏服务，保存为带图片的 Markdown
+// @version      0.2.0
+// @description  打开公众号或知乎专栏文章时，把链接发给本地剪藏服务，保存为带本地媒体的 Markdown
 // @match        https://mp.weixin.qq.com/s/*
 // @match        https://mp.weixin.qq.com/s?*
+// @match        https://zhuanlan.zhihu.com/p/*
 // @run-at       document-idle
 // @grant        GM_xmlhttpRequest
 // @connect      127.0.0.1
@@ -22,8 +23,9 @@
   const ENDPOINT = ORIGIN + "/api/clip";
 
   const page = new URL(location.href);
-  const isArticle = page.hostname === "mp.weixin.qq.com" && (page.pathname === "/s" || page.pathname.startsWith("/s/"));
-  if (!isArticle) return;
+  const isWechat = page.hostname === "mp.weixin.qq.com" && (page.pathname === "/s" || page.pathname.startsWith("/s/"));
+  const isZhihu = page.hostname === "zhuanlan.zhihu.com" && /^\/p\/[^/]+\/?$/.test(page.pathname);
+  if (!isWechat && !isZhihu) return;
 
   const host = document.createElement("div");
   host.style.cssText = "all: initial; position: fixed; z-index: 2147483647;";
@@ -42,7 +44,7 @@
       a { background: #1d6b4f; color: #f4fbf7; }
     </style>
     <div class="panel">
-      <strong>公众号剪藏</strong>
+      <strong id="title">剪藏</strong>
       <p id="status">准备把这篇发给本地服务…</p>
       <div class="actions">
         <button id="retry" type="button">重新剪藏</button>
@@ -51,6 +53,8 @@
     </div>
   `;
   const statusEl = shadow.getElementById("status");
+  const titleEl = shadow.getElementById("title");
+  titleEl.textContent = isZhihu ? "专栏剪藏" : "公众号剪藏";
   const retry = shadow.getElementById("retry");
   const preview = shadow.getElementById("preview");
 
@@ -71,8 +75,12 @@
         let data = {};
         try { data = JSON.parse(response.responseText || "{}"); } catch (error) { data = {}; }
         if (data.need_html && !payload.html) {
-          if (!document.querySelector("#js_content")) {
+          if (isWechat && !document.querySelector("#js_content")) {
             setStatus("服务器被微信拦住了，而当前页也没有正文。");
+            return;
+          }
+          if (isZhihu && !document.querySelector(".Post-RichText, .RichText.ztext")) {
+            setStatus("服务器被知乎拦住了，而当前页也没有正文。");
             return;
           }
           post({ url: payload.url, html: document.documentElement.outerHTML, force: payload.force });

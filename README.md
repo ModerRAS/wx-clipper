@@ -1,6 +1,6 @@
 # 公众号剪藏
 
-在浏览器打开一篇微信公众号文章时，把链接交给本机的 Rust 服务。服务抓取正文，把图片、音频和视频下载到本地，保存成 Markdown。
+在浏览器打开一篇微信公众号或知乎专栏文章时，把链接交给本机的 Rust 服务。服务抓取正文，把图片、音频和视频下载到本地，保存成 Markdown。
 
 适合自己读过、想留档的文章。它不会按公众号批量拉历史，也不会登录微信。
 
@@ -14,7 +14,7 @@
 | 公众号 | `#js_name` |
 | 作者 | `#js_author_name` |
 | 发布时间 | 脚本里的 `create_time`（Unix 秒），页面上的时间节点要等 JavaScript 才填上 |
-| 正文 | `#js_content` |
+| 正文 | 公众号是 `#js_content`。知乎专栏是 `.Post-RichText` |
 | 图片、音频、视频 | 正文里的 `img`、`audio`、`video`、`source` 和背景图，下载到 `images/`、`audio/`、`video/` |
 
 直接请求有时会遇到「环境异常」。这时油猴脚本会把浏览器里已经打开的页面 HTML 再发一次，服务改用这份正文，不再自己去抓。
@@ -61,19 +61,28 @@ cargo run --release -- serve --addr 127.0.0.1:17331 --output ~/notes/wechat
 
 环境变量 `WXCLIP_ADDR`、`WXCLIP_OUT` 是同样的默认值。`--force` 会覆盖已经保存过的同一篇。
 
+Windows 上可以装成开机自启的服务。还不是管理员时会弹出系统授权框：
+
+```bash
+wx-clipper install --output clips
+wx-clipper uninstall
+```
+
+`uninstall` 只移除服务，不删除已经保存的文章。
+
 ## 油猴脚本
 
 1. 浏览器安装 [Tampermonkey](https://www.tampermonkey.net/) 或 Violentmonkey。
 2. 打开 [wx-clipper.user.js](https://raw.githubusercontent.com/ModerRAS/wx-clipper/main/userscript/wx-clipper.user.js) 按提示安装。脚本之后从这条地址检查更新。源文件在 `userscript/wx-clipper.user.js`。服务已经启动时，也可以打开 [http://127.0.0.1:17331/wx-clipper.user.js](http://127.0.0.1:17331/wx-clipper.user.js)。
-3. 打开 `https://mp.weixin.qq.com/s/...` 文章。右下角出现「公众号剪藏」，成功后可以打开本地预览。
+3. 打开公众号文章或 `https://zhuanlan.zhihu.com/p/...` 专栏。右下角出现剪藏状态，成功后可以打开本地预览。
 
-脚本只匹配公众号文章页，并用 `GM_xmlhttpRequest` 访问本机，避免页面自身的跨域限制。服务只接受 `mp.weixin.qq.com` 的文章链接。正文里的图片、音频和视频会下载到本地，普通网页链接仍保留为链接。
+脚本匹配公众号文章页和知乎专栏文章页，并用 `GM_xmlhttpRequest` 访问本机，避免页面自身的跨域限制。服务接受这两种文章链接。正文里的图片、音频和视频会下载到本地，普通网页链接仍保留为链接。
 
 如果服务端抓取被验证页拦住，脚本会自动把当前文档发回去再试一次。
 
 ## 输出
 
-`article.md` 带 YAML 头（标题、公众号、作者、北京时间、原文链接）。正文媒体写成相对路径，例如 `images/img-001.jpg`、`audio/audio-001.mp3`、`video/video-001.mp4`。下载失败时，对应位置写成「图片缺失」「音频缺失」或「视频缺失」。`preview.html` 用同一份内容做本地预览。`clips/index.json` 用来按链接去重。
+`article.md` 带 YAML 头（标题、来源、作者、时间、原文链接）。正文媒体写成相对路径，例如 `images/img-001.jpg`、`audio/audio-001.mp3`、`video/video-001.mp4`。下载失败时，对应位置写成「图片缺失」「音频缺失」或「视频缺失」。`preview.html` 用同一份内容做本地预览。`clips/index.json` 用来按链接去重。剪藏页可以勾选已保存的文章，再重新剪藏。
 
 ## 测试
 

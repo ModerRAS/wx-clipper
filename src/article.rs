@@ -170,6 +170,12 @@ impl Article {
     }
 }
 
+pub fn zhihu_has_body(html: &str) -> bool {
+    html.contains("Post-RichText")
+        || html.contains("RichText ztext")
+        || html.contains("ztext RichText")
+}
+
 pub fn looks_blocked(html: &str) -> bool {
     let has_article = html.contains("id=\"js_content\"") || html.contains("id='js_content'");
     if has_article && (html.contains("activity-name") || html.contains("msg_title")) {
@@ -182,6 +188,9 @@ pub fn looks_blocked(html: &str) -> bool {
 }
 
 pub fn parse_article(html: &str, source_url: &str) -> Result<Article, ParseError> {
+    if crate::urlutil::is_zhihu_column_url(source_url) {
+        return parse_zhihu(html, source_url);
+    }
     if looks_blocked(html) {
         return Err(ParseError::Blocked);
     }
@@ -236,6 +245,80 @@ pub fn parse_article(html: &str, source_url: &str) -> Result<Article, ParseError
         body_html,
         images: builder.images,
     })
+}
+
+fn parse_zhihu(html: &str, source_url: &str) -> Result<Article, ParseError> {
+    if !zhihu_has_body(html) {
+        return Err(ParseError::NoContent);
+    }
+    let document = Html::parse_document(html);
+    let content = zhihu_content(&document).ok_or(ParseError::NoContent)?;
+    let mut builder = Builder::default();
+    let body_html = serialize_preview(&mut builder, content);
+    let blocks = render_children_blocks(&mut builder, content);
+    let body_markdown = join_markdown(&blocks);
+    if body_markdown.trim().is_empty() && builder.images.is_empty() {
+        return Err(ParseError::NoContent);
+    }
+    let mut title = coalesce([
+        select_text(&document, ".Post-Title"),
+        nonempty(meta_content(&document, "og:title")),
+    ]);
+    if title.is_empty() {
+        title = "未命名文章".into();
+    }
+    let author = select_text(&document, ".AuthorInfo-name")
+        .or_else(|| select_text(&document, ".UserLink-link"))
+        .unwrap_or_default();
+    let account = select_text(&document, ".ColumnLink").unwrap_or_else(|| "知乎".into());
+    let (published_display, published_cst) = zhihu_published(&document);
+    Ok(Article {
+        title,
+        account,
+        author,
+        published_display,
+        published_cst,
+        digest: meta_content(&document, "og:description"),
+        cover: meta_content(&document, "og:image"),
+        source_url: source_url.to_string(),
+        body_markdown,
+        body_html,
+        images: builder.images,
+    })
+}
+
+fn zhihu_content(document: &Html) -> Option<ElementRef<'_>> {
+    for selector in [".Post-RichText", ".RichText.ztext"] {
+        let sel = Selector::parse(selector).expect("selector");
+        if let Some(element) = document.select(&sel).next() {
+            return Some(element);
+        }
+    }
+    None
+}
+
+fn zhihu_published(document: &Html) -> (String, Option<DateTime<FixedOffset>>) {
+    let sel = Selector::parse("time[datetime]").expect("selector");
+    if let Some(element) = document.select(&sel).next() {
+        if let Some(raw) = element.attr("datetime") {
+            if let Ok(parsed) = DateTime::parse_from_rfc3339(raw) {
+                let cst = parsed.with_timezone(&FixedOffset::east_opt(CST).expect("cst"));
+                return (cst.format("%Y-%m-%d %H:%M:%S").to_string(), Some(cst));
+            }
+        }
+        let visible = clean_text(&element.text().collect::<String>());
+        let visible = visible.trim_start_matches("发布于").trim().to_string();
+        if !visible.is_empty() {
+            return (visible, None);
+        }
+    }
+    if let Some(text) = select_text(document, ".ContentItem-time") {
+        let display = text.trim_start_matches("发布于").trim().to_string();
+        if !display.is_empty() {
+            return (display, None);
+        }
+    }
+    (String::new(), None)
 }
 
 fn nonempty(value: String) -> Option<String> {
@@ -397,8 +480,47 @@ fn render_element(builder: &mut Builder, el: ElementRef) -> Vec<Block> {
         return Vec::new();
     }
     let mut blocks = background_blocks(builder, el);
+    if is_zhihu_player(el) && !element_has_playable_media(el) {
+        blocks.push(Block::Paragraph(vec![Inline::Text(zhihu_player_label(el))]));
+        blocks.extend(render_children_blocks(builder, el));
+        return blocks;
+    }
     blocks.extend(render_element_body(builder, el));
     blocks
+}
+
+fn is_zhihu_player(el: ElementRef) -> bool {
+    if el.attr("data-lens-id").is_some() {
+        return true;
+    }
+    el.attr("class").is_some_and(|class| {
+        class
+            .split_whitespace()
+            .any(|token| matches!(token, "RichText-video" | "VideoCard" | "ZVideoItem"))
+    })
+}
+
+fn zhihu_player_label(el: ElementRef) -> String {
+    let title = el
+        .attr("data-title")
+        .or_else(|| el.attr("data-name"))
+        .unwrap_or("")
+        .trim();
+    if title.is_empty() {
+        "视频".into()
+    } else {
+        format!("视频：{title}")
+    }
+}
+
+fn element_has_playable_media(el: ElementRef) -> bool {
+    let name = el.value().name();
+    if matches!(name, "video" | "audio" | "source")
+        && media_attr(el, &["data-src", "src"]).is_some()
+    {
+        return true;
+    }
+    el.child_elements().any(element_has_playable_media)
 }
 
 fn render_element_body(builder: &mut Builder, el: ElementRef) -> Vec<Block> {
@@ -812,6 +934,8 @@ fn image_inline(builder: &mut Builder, el: ElementRef) -> Option<Inline> {
         .attr("data-src")
         .filter(|value| !value.trim().is_empty())
         .or_else(|| el.attr("data-original"))
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| el.attr("data-actualsrc"))
         .filter(|value| !value.trim().is_empty())
         .or_else(|| el.attr("src"))?;
     let url = normalize_img_url(raw)?;
@@ -1370,6 +1494,7 @@ pub fn normalize_img_url(raw: &str) -> Option<String> {
     Some(url.to_string())
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn ext_from_url(url: &str) -> &'static str {
     ext_for_kind(MediaKind::Image, url)
 }
@@ -2394,5 +2519,62 @@ let x = 1;
         assert!(article.body_html.contains("视频缺失"));
         assert!(article.body_html.contains("none"));
         assert!(!article.body_html.contains("url("));
+    }
+
+    #[test]
+    fn parses_zhihu_column_html() {
+        let html = r#"<html><head>
+<meta property="og:title" content="专栏标题">
+<meta property="og:description" content="专栏摘要">
+</head><body>
+<h1 class="Post-Title">专栏标题</h1>
+<a class="AuthorInfo-name" href="https://www.zhihu.com/people/a">作者乙</a>
+<a class="ColumnLink" href="https://zhuanlan.zhihu.com/column/demo">示例专栏</a>
+<time datetime="2026-09-30T07:30:00Z">发布于 2026-09-30 15:30</time>
+<div class="Post-RichText">
+<p>你好 <strong>知乎</strong></p>
+<h2>小节</h2>
+<img data-original="https://picx.zhimg.com/a.png" alt="图">
+<div class="RichText-video" data-lens-id="999" data-title="讲解"></div>
+<p><a href="https://example.com/docs">文档</a></p>
+</div>
+</body></html>"#;
+        let article =
+            parse_article(html, "https://zhuanlan.zhihu.com/p/2036046085232256716").unwrap();
+        assert_eq!(article.title, "专栏标题");
+        assert_eq!(article.author, "作者乙");
+        assert_eq!(article.account, "示例专栏");
+        assert_eq!(article.published_display, "2026-09-30 15:30:00");
+        assert_eq!(article.digest, "专栏摘要");
+        assert_eq!(
+            article.body_markdown,
+            "你好 **知乎**\n\n## 小节\n\n![图](images/img-001.png)\n\n视频：讲解\n\n[文档](https://example.com/docs)\n"
+        );
+        assert!(article.body_html.contains("src=\"images/img-001.png\""));
+        assert!(!article.body_markdown.contains("picx.zhimg.com"));
+        assert!(!article.body_html.contains("picx.zhimg.com"));
+        assert!(!article.body_markdown.contains("https://example.com/a.png"));
+        assert_eq!(article.images.len(), 1);
+        assert_eq!(article.images[0].relative_path, "images/img-001.png");
+    }
+
+    #[test]
+    fn zhihu_shell_has_no_body() {
+        let html = r#"<html><body><script src="https://static.zhihu.com/zse-ck/v4/a.js"></script></body></html>"#;
+        assert!(!zhihu_has_body(html));
+        assert!(matches!(
+            parse_article(html, "https://zhuanlan.zhihu.com/p/1"),
+            Err(ParseError::NoContent)
+        ));
+    }
+
+    #[test]
+    fn zhihu_column_without_name_uses_zhihu() {
+        let html = r#"<div class="RichText ztext"><p>只有正文</p></div>"#;
+        let article = parse_article(html, "https://zhuanlan.zhihu.com/p/42").unwrap();
+        assert_eq!(article.account, "知乎");
+        assert_eq!(article.title, "未命名文章");
+        assert_eq!(article.body_markdown, "只有正文\n");
+        assert!(article.published_display.is_empty());
     }
 }

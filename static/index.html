@@ -62,6 +62,10 @@
   .steps { margin: 0; padding-left: 1.1rem; color: var(--muted); }
   .steps a { color: var(--accent); }
   h2 { margin: 8px 0 14px; font-size: 1.15rem; }
+  .list-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
+  .list-head h2 { margin: 0; }
+  .clip-row { display: flex; gap: 12px; align-items: flex-start; }
+  .clip-row input { margin-top: 6px; }
   .empty, .status { color: var(--muted); }
   article.clip { padding: 14px 0; border-top: 1px solid var(--line); }
   article.clip:first-of-type { border-top: 0; padding-top: 0; }
@@ -80,13 +84,13 @@
 <main>
   <header>
     <h1>公众号剪藏</h1>
-    <p>在浏览器打开一篇微信公众号文章，油猴脚本会把链接交给这台电脑。服务抓取正文和图片，写成 Markdown，放进本地目录。</p>
+    <p>在浏览器打开一篇微信公众号或知乎专栏文章，油猴脚本会把链接交给这台电脑。服务抓取正文和媒体，写成 Markdown，放进本地目录。</p>
   </header>
   <div class="grid">
     <section class="card">
       <form id="clip-form">
         <label for="url">文章链接</label>
-        <input id="url" name="url" type="url" required placeholder="https://mp.weixin.qq.com/s/……" autocomplete="off">
+        <input id="url" name="url" type="url" required placeholder="公众号或知乎专栏链接" autocomplete="off">
         <div class="row">
           <button id="submit" type="submit">剪藏这篇</button>
           <label class="check"><input id="force" type="checkbox"> 已保存过也重新抓取</label>
@@ -99,12 +103,18 @@
       <ol class="steps">
         <li>安装 Tampermonkey 或 Violentmonkey。</li>
         <li>打开 <a href="/wx-clipper.user.js">油猴脚本</a>，按提示安装。</li>
-        <li>之后打开 <code>mp.weixin.qq.com</code> 文章，右下角会出现剪藏状态。</li>
+        <li>之后打开公众号或知乎专栏文章，右下角会出现剪藏状态。</li>
       </ol>
     </section>
   </div>
   <section class="card" id="list-card">
-    <h2>已保存</h2>
+    <div class="list-head">
+      <h2>已保存</h2>
+      <div class="row">
+        <label class="check"><input id="select-all" type="checkbox" disabled> 全选</label>
+        <button id="reclip" type="button" disabled>重新剪藏</button>
+      </div>
+    </div>
     <div id="list" class="status">正在读取已保存的文章…</div>
   </section>
 </main>
@@ -115,6 +125,9 @@ const forceInput = document.querySelector("#force");
 const submit = document.querySelector("#submit");
 const banner = document.querySelector("#banner");
 const list = document.querySelector("#list");
+const selectAll = document.querySelector("#select-all");
+const reclip = document.querySelector("#reclip");
+let reclipRunning = false;
 
 function showBanner(text, isError) {
   banner.hidden = false;
@@ -126,7 +139,36 @@ function safePreview(url) {
   return typeof url === "string" && url.startsWith("/files/") ? url : "";
 }
 function safeSource(url) {
-  return typeof url === "string" && url.startsWith("https://mp.weixin.qq.com/") ? url : "";
+  if (typeof url !== "string") return "";
+  try {
+    const parsed = new URL(url);
+    const host = parsed.hostname;
+    const column = host === "zhuanlan.zhihu.com" && parsed.pathname.startsWith("/p/");
+    const wechat = host === "mp.weixin.qq.com";
+    return parsed.protocol === "https:" && (column || wechat) ? url : "";
+  } catch (error) {
+    return "";
+  }
+}
+
+function clipUrl(url) {
+  if (typeof url !== "string") return "";
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === "https:" ? url : "";
+  } catch (error) {
+    return "";
+  }
+}
+
+function syncSelection() {
+  const boxes = [...list.querySelectorAll("input.pick")];
+  const checked = boxes.filter((box) => box.checked).length;
+  selectAll.disabled = reclipRunning || boxes.length === 0;
+  selectAll.checked = boxes.length > 0 && checked === boxes.length;
+  selectAll.indeterminate = checked > 0 && checked < boxes.length;
+  reclip.disabled = reclipRunning || checked === 0;
+  for (const box of boxes) box.disabled = reclipRunning;
 }
 
 function renderClips(clips) {
@@ -137,11 +179,21 @@ function renderClips(clips) {
     empty.className = "empty";
     empty.textContent = "还没有文章。贴一条链接，或者装上油猴脚本后直接打开文章。";
     list.append(empty);
+    syncSelection();
     return;
   }
   for (const clip of clips) {
     const item = document.createElement("article");
     item.className = "clip";
+    const row = document.createElement("div");
+    row.className = "clip-row";
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.className = "pick";
+    box.dataset.url = clipUrl(clip.source_url);
+    box.dataset.title = clip.title || "未命名文章";
+    box.addEventListener("change", syncSelection);
+    const body = document.createElement("div");
     const title = document.createElement("h3");
     title.textContent = clip.title || "未命名文章";
     const meta = document.createElement("div");
@@ -172,9 +224,12 @@ function renderClips(clips) {
       link.textContent = "原文";
       actions.append(link);
     }
-    item.append(title, meta, path, actions);
+    body.append(title, meta, path, actions);
+    row.append(box, body);
+    item.append(row);
     list.append(item);
   }
+  syncSelection();
 }
 
 async function loadClips() {
@@ -214,6 +269,61 @@ form.addEventListener("submit", async (event) => {
     showBanner("请求没有完成。", true);
   } finally {
     submit.disabled = false;
+  }
+});
+
+selectAll.addEventListener("change", () => {
+  if (reclipRunning) return;
+  for (const box of list.querySelectorAll("input.pick")) {
+    box.checked = selectAll.checked;
+  }
+  syncSelection();
+});
+
+reclip.addEventListener("click", async () => {
+  if (reclipRunning) return;
+  const picked = [...list.querySelectorAll("input.pick:checked")].map((box) => ({
+    url: box.dataset.url || "",
+    title: box.dataset.title || "未命名文章",
+  }));
+  if (!picked.length) return;
+  reclipRunning = true;
+  syncSelection();
+  let saved = 0;
+  const failures = [];
+  try {
+    for (let index = 0; index < picked.length; index += 1) {
+      const item = picked[index];
+      showBanner(`正在重新剪藏 ${index + 1}/${picked.length}：${item.title}`, false);
+      if (!item.url) {
+        failures.push(`${item.title}：没有文章链接`);
+        continue;
+      }
+      try {
+        const response = await fetch("/api/clip", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ url: item.url, force: true }),
+        });
+        let data = {};
+        try { data = await response.json(); } catch (error) { data = {}; }
+        if (!response.ok || !data.ok) {
+          failures.push(`${item.title}：${data.message || "剪藏失败"}`);
+        } else {
+          saved += 1;
+        }
+      } catch (error) {
+        failures.push(`${item.title}：请求没有完成`);
+      }
+    }
+  } finally {
+    reclipRunning = false;
+    await loadClips();
+  }
+  if (failures.length) {
+    showBanner(`重新剪藏完成：成功 ${saved} 篇，失败 ${failures.length} 篇。${failures.join("；")}`, true);
+  } else {
+    showBanner(`重新剪藏完成：成功 ${saved} 篇。`, false);
   }
 });
 

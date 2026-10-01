@@ -10,21 +10,58 @@ pub fn parse_article_url(raw: &str) -> Result<Url, ClipError> {
     if url.scheme() == "http" {
         url.set_scheme("https").map_err(|_| ClipError::BadUrl)?;
     }
-    if url.scheme() != "https" || url.host_str() != Some("mp.weixin.qq.com") {
+    if url.scheme() != "https" {
         return Err(ClipError::BadUrl);
+    }
+    if is_wechat_article(&url) || is_zhihu_column(&url) {
+        Ok(url)
+    } else {
+        Err(ClipError::BadUrl)
+    }
+}
+
+pub fn is_zhihu_column(url: &Url) -> bool {
+    url.host_str() == Some("zhuanlan.zhihu.com") && zhihu_column_id(url).is_some()
+}
+
+pub fn is_zhihu_column_url(raw: &str) -> bool {
+    parse_article_url(raw)
+        .ok()
+        .is_some_and(|url| is_zhihu_column(&url))
+}
+
+pub fn is_zhihu_host(host: &str) -> bool {
+    host == "zhuanlan.zhihu.com" || host == "www.zhihu.com" || host.ends_with(".zhihu.com")
+}
+
+fn is_wechat_article(url: &Url) -> bool {
+    if url.host_str() != Some("mp.weixin.qq.com") {
+        return false;
     }
     let path = url.path().trim_end_matches('/');
     let short = path
         .strip_prefix("/s/")
         .filter(|id| !id.is_empty() && !id.contains('/'));
     let query_article = path == "/s" && url.query().is_some();
-    if short.is_none() && !query_article {
-        return Err(ClipError::BadUrl);
+    short.is_some() || query_article
+}
+
+fn zhihu_column_id(url: &Url) -> Option<String> {
+    let path = url.path().trim_end_matches('/');
+    let id = path.strip_prefix("/p/")?;
+    if id.is_empty() || id.contains('/') {
+        None
+    } else {
+        Some(id.to_string())
     }
-    Ok(url)
 }
 
 pub fn canonical_article_url(url: &Url) -> String {
+    if let Some(id) = zhihu_column_id(url) {
+        if url.host_str() == Some("zhuanlan.zhihu.com") {
+            return format!("https://zhuanlan.zhihu.com/p/{id}");
+        }
+    }
     let path = url.path().trim_end_matches('/');
     if let Some(id) = path.strip_prefix("/s/") {
         if !id.is_empty() && !id.contains('/') {
@@ -44,6 +81,11 @@ pub fn canonical_article_url(url: &Url) -> String {
 }
 
 pub fn article_key(url: &Url) -> String {
+    if let Some(id) = zhihu_column_id(url) {
+        if url.host_str() == Some("zhuanlan.zhihu.com") {
+            return sanitize_id(&id);
+        }
+    }
     let path = url.path().trim_end_matches('/');
     if let Some(id) = path.strip_prefix("/s/") {
         if !id.is_empty() && !id.contains('/') {
@@ -190,6 +232,27 @@ mod tests {
     fn rejects_other_hosts() {
         assert!(parse_article_url("https://example.com/s/abc").is_err());
         assert!(parse_article_url("https://mp.weixin.qq.com/cgi-bin/home").is_err());
+    }
+
+    #[test]
+    fn accepts_zhihu_column_and_strips_tracking() {
+        let url =
+            parse_article_url("http://zhuanlan.zhihu.com/p/2036046085232256716?utm_source=wechat")
+                .unwrap();
+        assert!(is_zhihu_column(&url));
+        assert_eq!(
+            canonical_article_url(&url),
+            "https://zhuanlan.zhihu.com/p/2036046085232256716"
+        );
+        assert_eq!(article_key(&url), "2036046085232256716");
+    }
+
+    #[test]
+    fn rejects_zhihu_questions_and_other_paths() {
+        assert!(parse_article_url("https://www.zhihu.com/question/1").is_err());
+        assert!(parse_article_url("https://www.zhihu.com/answer/1").is_err());
+        assert!(parse_article_url("https://zhuanlan.zhihu.com/column/demo").is_err());
+        assert!(parse_article_url("https://zhuanlan.zhihu.com/p/").is_err());
     }
 
     #[test]

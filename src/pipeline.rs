@@ -6,7 +6,7 @@ use crate::article::{looks_blocked, parse_article, ParseError};
 use crate::error::ClipError;
 use crate::fetch::{self, FetchFail};
 use crate::store::{self, ClipRecord};
-use crate::urlutil::{canonical_article_url, parse_article_url};
+use crate::urlutil::{canonical_article_url, is_zhihu_column, parse_article_url};
 
 pub struct ClipOutput {
     pub status: &'static str,
@@ -45,10 +45,10 @@ pub async fn clip_article(
 
     let html_override = html_override.filter(|html| !html.trim().is_empty());
     let html = if let Some(html) = html_override {
-        if looks_blocked(&html) {
+        if !is_zhihu_column(&page_url) && looks_blocked(&html) {
             return Err(ClipError::Blocked);
         }
-        if !has_article(&html) {
+        if !has_article(&page_url, &html) {
             return Err(ClipError::Empty);
         }
         html
@@ -122,8 +122,12 @@ fn output_from_record(
     }
 }
 
-fn has_article(html: &str) -> bool {
-    html.contains("id=\"js_content\"") || html.contains("id='js_content'")
+fn has_article(url: &url::Url, html: &str) -> bool {
+    if is_zhihu_column(url) {
+        crate::article::zhihu_has_body(html)
+    } else {
+        html.contains("id=\"js_content\"") || html.contains("id='js_content'")
+    }
 }
 
 pub fn display_path(path: &Path) -> String {
