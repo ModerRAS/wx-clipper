@@ -1,3 +1,5 @@
+use std::net::{Ipv4Addr, Ipv6Addr};
+
 use url::Url;
 
 use crate::error::ClipError;
@@ -107,6 +109,57 @@ pub fn host_allowed(host: &str) -> bool {
         || host.ends_with(".wx.qq.com")
 }
 
+pub fn is_public_media_url(raw: &str) -> bool {
+    let Ok(url) = Url::parse(raw) else {
+        return false;
+    };
+    matches!(url.scheme(), "http" | "https") && host_is_public(&url)
+}
+
+pub fn media_redirect_allowed(url: &Url) -> bool {
+    url.scheme() == "https" && host_is_public(url)
+}
+
+fn host_is_public(url: &Url) -> bool {
+    match url.host() {
+        Some(url::Host::Domain(host)) => {
+            let host = host.trim_end_matches('.').to_ascii_lowercase();
+            !host.is_empty()
+                && host != "localhost"
+                && !host.ends_with(".localhost")
+                && !host.ends_with(".local")
+        }
+        Some(url::Host::Ipv4(ip)) => ipv4_is_public(ip),
+        Some(url::Host::Ipv6(ip)) => ipv6_is_public(ip),
+        None => false,
+    }
+}
+
+fn ipv4_is_public(ip: Ipv4Addr) -> bool {
+    let octets = ip.octets();
+    let cgnat = octets[0] == 100 && (octets[1] & 0xc0) == 0x40;
+    !ip.is_private()
+        && !ip.is_loopback()
+        && !ip.is_link_local()
+        && !ip.is_broadcast()
+        && !ip.is_unspecified()
+        && !ip.is_documentation()
+        && !ip.is_multicast()
+        && !cgnat
+        && octets[0] != 0
+}
+
+fn ipv6_is_public(ip: Ipv6Addr) -> bool {
+    if let Some(v4) = ip.to_ipv4() {
+        return ipv4_is_public(v4);
+    }
+    !ip.is_loopback()
+        && !ip.is_unspecified()
+        && !ip.is_multicast()
+        && !ip.is_unicast_link_local()
+        && !ip.is_unique_local()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -142,5 +195,23 @@ mod tests {
     #[test]
     fn slug_keeps_chinese() {
         assert_eq!(slugify("Electron 要慌了？", 20), "Electron-要慌了");
+    }
+
+    #[test]
+    fn public_media_urls_skip_local_networks() {
+        assert!(is_public_media_url("https://example.com/a.png"));
+        assert!(is_public_media_url("http://res.wx.qq.com/emoji.png"));
+        assert!(!is_public_media_url("http://127.0.0.1/a.png"));
+        assert!(!is_public_media_url("http://192.168.1.8/a.png"));
+        assert!(!is_public_media_url("http://10.1.2.3/a.png"));
+        assert!(!is_public_media_url("http://172.16.0.4/a.png"));
+        assert!(!is_public_media_url("http://169.254.1.1/a.png"));
+        assert!(!is_public_media_url("https://files.local/a.png"));
+        assert!(!is_public_media_url("http://localhost/a.png"));
+        assert!(!is_public_media_url("http://[::1]/a.png"));
+        let redirected = Url::parse("http://cdn.example.com/a.png").unwrap();
+        assert!(!media_redirect_allowed(&redirected));
+        let https = Url::parse("https://cdn.example.com/a.png").unwrap();
+        assert!(media_redirect_allowed(&https));
     }
 }

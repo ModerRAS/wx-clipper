@@ -4,7 +4,7 @@ use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, ACCEPT_LANGUAGE, REFERER, 
 use reqwest::{redirect, Client};
 
 use crate::article::looks_blocked;
-use crate::urlutil::host_allowed;
+use crate::urlutil::{host_allowed, media_redirect_allowed};
 
 pub const CHROME_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36";
 const WECHAT_UA: &str = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 MicroMessenger/8.0.50(0x18003232) NetType/WIFI Language/zh_CN";
@@ -41,6 +41,31 @@ pub fn build_client() -> Client {
         }))
         .build()
         .expect("创建 HTTP 客户端失败")
+}
+
+pub fn build_media_client() -> Client {
+    let mut headers = HeaderMap::new();
+    headers.insert(USER_AGENT, HeaderValue::from_static(CHROME_UA));
+    headers.insert(
+        ACCEPT_LANGUAGE,
+        HeaderValue::from_static("zh-CN,zh;q=0.9,en;q=0.8"),
+    );
+    Client::builder()
+        .timeout(Duration::from_secs(180))
+        .connect_timeout(Duration::from_secs(15))
+        .default_headers(headers)
+        .redirect(redirect::Policy::custom(|attempt| {
+            if attempt.previous().len() >= 5 {
+                return attempt.error(std::io::Error::other("重定向次数过多"));
+            }
+            if media_redirect_allowed(attempt.url()) {
+                attempt.follow()
+            } else {
+                attempt.error(std::io::Error::other("媒体跳转到了非公网地址"))
+            }
+        }))
+        .build()
+        .expect("创建媒体下载客户端失败")
 }
 
 pub async fn fetch_article(client: &Client, url: &str) -> Result<String, FetchFail> {

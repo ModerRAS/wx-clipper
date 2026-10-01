@@ -67,11 +67,11 @@ async fn main() -> ExitCode {
                     println!("预览：{}", output.preview_path);
                     if output.image_failed > 0 {
                         println!(
-                            "图片：{} 张已保存，{} 张失败",
+                            "媒体：{} 个已保存，{} 个失败",
                             output.image_count, output.image_failed
                         );
                     } else {
-                        println!("图片：{} 张", output.image_count);
+                        println!("媒体：{} 个", output.image_count);
                     }
                     ExitCode::SUCCESS
                 }

@@ -147,7 +147,7 @@ function renderClips(clips) {
     const meta = document.createElement("div");
     meta.className = "meta";
     const bits = [clip.account, clip.author, clip.published].filter(Boolean);
-    const images = clip.image_failed ? `${clip.image_count} 张图，${clip.image_failed} 张失败` : `${clip.image_count} 张图`;
+    const images = clip.image_failed ? `${clip.image_count} 个媒体，${clip.image_failed} 个失败` : `${clip.image_count} 个媒体`;
     meta.textContent = [...bits, images].join(" · ");
     const path = document.createElement("code");
     path.className = "path";

@@ -23,10 +23,67 @@ pub enum ParseError {
     NoContent,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MediaKind {
+    Image,
+    Audio,
+    Video,
+}
+
+impl MediaKind {
+    pub fn missing_label(self) -> &'static str {
+        match self {
+            Self::Image => "图片缺失",
+            Self::Audio => "音频缺失",
+            Self::Video => "视频缺失",
+        }
+    }
+
+    pub fn max_bytes(self) -> usize {
+        match self {
+            Self::Image => 20 * 1024 * 1024,
+            Self::Audio | Self::Video => 80 * 1024 * 1024,
+        }
+    }
+
+    fn link_label(self) -> &'static str {
+        match self {
+            Self::Image => "图片",
+            Self::Audio => "音频",
+            Self::Video => "视频",
+        }
+    }
+
+    fn directory(self) -> &'static str {
+        match self {
+            Self::Image => "images",
+            Self::Audio => "audio",
+            Self::Video => "video",
+        }
+    }
+
+    fn file_prefix(self) -> &'static str {
+        match self {
+            Self::Image => "img",
+            Self::Audio => "audio",
+            Self::Video => "video",
+        }
+    }
+
+    fn default_ext(self) -> &'static str {
+        match self {
+            Self::Image => "jpg",
+            Self::Audio => "mp3",
+            Self::Video => "mp4",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ImageAsset {
     pub url: String,
     pub relative_path: String,
+    pub kind: MediaKind,
 }
 
 #[derive(Debug)]
@@ -409,6 +466,7 @@ fn render_element_body(builder: &mut Builder, el: ElementRef) -> Vec<Block> {
             }
         }
         "mpvoice" | "mp-common-mpaudio" => voice_block(el),
+        "audio" | "video" | "source" => media_blocks(builder, el),
         "p" => {
             if contains_block_child(el) {
                 render_children_blocks(builder, el)
@@ -586,16 +644,87 @@ fn collect_rows(builder: &mut Builder, el: ElementRef, rows: &mut Vec<Vec<Vec<In
     }
 }
 
-fn voice_block(el: ElementRef) -> Vec<Block> {
+fn voice_label(el: ElementRef) -> String {
     let name = el
         .attr("name")
         .or_else(|| el.attr("data-name"))
         .unwrap_or("音频")
         .trim();
-    let label = if name.is_empty() { "音频" } else { name };
+    if name.is_empty() {
+        "音频".into()
+    } else {
+        name.to_string()
+    }
+}
+
+fn voice_block(el: ElementRef) -> Vec<Block> {
     vec![Block::Paragraph(vec![Inline::Text(format!(
-        "音频：{label}"
+        "音频：{}",
+        voice_label(el)
     ))])]
+}
+
+fn media_blocks(builder: &mut Builder, el: ElementRef) -> Vec<Block> {
+    let kind = media_kind(el);
+    let mut blocks = Vec::new();
+    if el.value().name() == "video" {
+        if let Some(url) = media_attr(el, &["poster", "data-poster"]) {
+            blocks.extend(paragraph(vec![builder.push_image(url, String::new())]));
+        }
+    }
+    let own = media_attr(el, &["data-src", "src"]);
+    if let Some(url) = &own {
+        blocks.extend(media_link(builder, kind, url));
+    }
+    if matches!(el.value().name(), "audio" | "video") {
+        for child in el.child_elements() {
+            if child.value().name() != "source" || is_hidden(child) {
+                continue;
+            }
+            let Some(url) = media_attr(child, &["src", "data-src"]) else {
+                continue;
+            };
+            if own.as_ref() == Some(&url) {
+                continue;
+            }
+            blocks.extend(media_link(builder, kind, &url));
+        }
+    }
+    blocks
+}
+
+fn media_link(builder: &mut Builder, kind: MediaKind, url: &str) -> Vec<Block> {
+    match builder.register(kind, url) {
+        Some(path) => paragraph(vec![Inline::Link {
+            href: path,
+            children: vec![Inline::Text(kind.link_label().into())],
+        }]),
+        None => paragraph(vec![Inline::Text(kind.missing_label().into())]),
+    }
+}
+
+fn media_kind(el: ElementRef) -> MediaKind {
+    match el.value().name() {
+        "audio" => MediaKind::Audio,
+        "source" => match element_parent(el).map(|parent| parent.value().name()) {
+            Some("audio") => MediaKind::Audio,
+            _ => MediaKind::Video,
+        },
+        _ => MediaKind::Video,
+    }
+}
+
+fn element_parent(el: ElementRef) -> Option<ElementRef> {
+    ElementRef::wrap(el.parent()?)
+}
+
+fn media_attr(el: ElementRef, names: &[&str]) -> Option<String> {
+    names.iter().find_map(|name| {
+        el.attr(name)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .and_then(normalize_img_url)
+    })
 }
 
 fn embed_or_empty(el: ElementRef) -> Vec<Block> {
@@ -691,29 +820,33 @@ fn image_inline(builder: &mut Builder, el: ElementRef) -> Option<Inline> {
 }
 
 impl Builder {
+    fn register(&mut self, kind: MediaKind, url: &str) -> Option<String> {
+        if let Some(existing) = self.images.iter().find(|item| item.url == url) {
+            return Some(existing.relative_path.clone());
+        }
+        if !crate::urlutil::is_public_media_url(url) {
+            return None;
+        }
+        let index = self.images.iter().filter(|item| item.kind == kind).count() + 1;
+        let relative_path = format!(
+            "{}/{}-{:03}.{}",
+            kind.directory(),
+            kind.file_prefix(),
+            index,
+            ext_for_kind(kind, url)
+        );
+        self.images.push(ImageAsset {
+            url: url.to_string(),
+            relative_path: relative_path.clone(),
+            kind,
+        });
+        Some(relative_path)
+    }
+
     fn push_image(&mut self, url: String, alt: String) -> Inline {
-        if is_wechat_cdn(&url) {
-            if let Some(existing) = self.images.iter().find(|img| img.url == url) {
-                return Inline::Image {
-                    alt,
-                    path: existing.relative_path.clone(),
-                };
-            }
-            let relative_path = format!(
-                "images/img-{:03}.{}",
-                self.images.len() + 1,
-                ext_from_url(&url)
-            );
-            self.images.push(ImageAsset {
-                url,
-                relative_path: relative_path.clone(),
-            });
-            Inline::Image {
-                alt,
-                path: relative_path,
-            }
-        } else {
-            Inline::Image { alt, path: url }
+        match self.register(MediaKind::Image, &url) {
+            Some(path) => Inline::Image { alt, path },
+            None => Inline::Text(MediaKind::Image.missing_label().into()),
         }
     }
 }
@@ -897,7 +1030,7 @@ fn background_blocks(builder: &mut Builder, el: ElementRef) -> Vec<Block> {
         if !is_background_prop(&name) {
             continue;
         }
-        for url in wechat_urls_in_css(&value) {
+        for url in css_http_urls(&value) {
             blocks.push(Block::Paragraph(vec![
                 builder.push_image(url, String::new())
             ]));
@@ -957,6 +1090,11 @@ fn is_block_tag(name: &str) -> bool {
             | "figcaption"
             | "header"
             | "footer"
+            | "audio"
+            | "video"
+            | "source"
+            | "mpvoice"
+            | "mp-common-mpaudio"
     )
 }
 
@@ -1232,31 +1370,33 @@ pub fn normalize_img_url(raw: &str) -> Option<String> {
     Some(url.to_string())
 }
 
-pub fn is_wechat_cdn(url: &str) -> bool {
-    let Ok(url) = Url::parse(url) else {
-        return false;
-    };
-    let Some(host) = url.host_str() else {
-        return false;
-    };
-    host == "mmbiz.qpic.cn" || host.ends_with(".qpic.cn") || host.ends_with(".qlogo.cn")
+pub fn ext_from_url(url: &str) -> &'static str {
+    ext_for_kind(MediaKind::Image, url)
 }
 
-pub fn ext_from_url(url: &str) -> &'static str {
+pub fn ext_for_kind(kind: MediaKind, url: &str) -> &'static str {
     let Ok(parsed) = Url::parse(url) else {
-        return "jpg";
+        return kind.default_ext();
     };
-    for (key, value) in parsed.query_pairs() {
-        if key == "wx_fmt" {
-            return map_ext(&value);
+    if kind == MediaKind::Image {
+        for (key, value) in parsed.query_pairs() {
+            if key == "wx_fmt" {
+                return map_ext(&value);
+            }
         }
     }
-    parsed
+    if let Some(ext) = parsed
         .path()
-        .rsplit('.')
+        .rsplit('/')
         .next()
-        .map(map_ext)
-        .unwrap_or("jpg")
+        .and_then(|file| file.rsplit_once('.'))
+        .map(|(_, ext)| ext)
+    {
+        if let Some(mapped) = map_known_ext(ext) {
+            return mapped;
+        }
+    }
+    kind.default_ext()
 }
 
 pub fn map_ext(value: &str) -> &'static str {
@@ -1266,6 +1406,25 @@ pub fn map_ext(value: &str) -> &'static str {
         "webp" => "webp",
         "jpg" | "jpeg" => "jpg",
         _ => "jpg",
+    }
+}
+
+fn map_known_ext(value: &str) -> Option<&'static str> {
+    match value.to_ascii_lowercase().as_str() {
+        "png" => Some("png"),
+        "gif" => Some("gif"),
+        "webp" => Some("webp"),
+        "jpg" | "jpeg" => Some("jpg"),
+        "mp3" => Some("mp3"),
+        "m4a" => Some("m4a"),
+        "aac" => Some("aac"),
+        "wav" => Some("wav"),
+        "ogg" => Some("ogg"),
+        "flac" => Some("flac"),
+        "mp4" => Some("mp4"),
+        "webm" => Some("webm"),
+        "mov" => Some("mov"),
+        _ => None,
     }
 }
 
@@ -1280,8 +1439,46 @@ pub fn ext_from_content_type(content_type: &str) -> Option<&'static str> {
         "image/png" => Some("png"),
         "image/gif" => Some("gif"),
         "image/webp" => Some("webp"),
+        "audio/mpeg" | "audio/mp3" => Some("mp3"),
+        "audio/mp4" | "audio/x-m4a" => Some("m4a"),
+        "audio/wav" | "audio/x-wav" | "audio/wave" => Some("wav"),
+        "audio/ogg" => Some("ogg"),
+        "audio/aac" => Some("aac"),
+        "audio/flac" | "audio/x-flac" => Some("flac"),
+        "video/mp4" => Some("mp4"),
+        "video/webm" => Some("webm"),
+        "video/quicktime" => Some("mov"),
         _ => None,
     }
+}
+
+pub fn is_html_content_type(content_type: &str) -> bool {
+    let content_type = content_type
+        .split(';')
+        .next()
+        .unwrap_or(content_type)
+        .trim();
+    content_type.eq_ignore_ascii_case("text/html")
+        || content_type.eq_ignore_ascii_case("application/xhtml+xml")
+}
+
+pub fn looks_like_html(bytes: &[u8]) -> bool {
+    let bytes = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes);
+    let trimmed = trim_ascii_start(bytes);
+    let head = trimmed.get(..64).unwrap_or(trimmed);
+    let lower = head.to_ascii_lowercase();
+    lower.starts_with(b"<!doctype html")
+        || lower.starts_with(b"<html")
+        || lower.starts_with(b"<head")
+        || lower.starts_with(b"<body")
+}
+
+fn trim_ascii_start(bytes: &[u8]) -> &[u8] {
+    let offset = bytes
+        .iter()
+        .position(|byte| !byte.is_ascii_whitespace())
+        .unwrap_or(bytes.len());
+    &bytes[offset..]
 }
 
 pub fn sniff_ext(bytes: &[u8]) -> Option<&'static str> {
@@ -1296,6 +1493,34 @@ pub fn sniff_ext(bytes: &[u8]) -> Option<&'static str> {
     }
     if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
         return Some("webp");
+    }
+    if bytes.starts_with(b"ID3") {
+        return Some("mp3");
+    }
+    if bytes.len() >= 2 && bytes[0] == 0xFF && matches!(bytes[1], 0xFB | 0xF3 | 0xF2 | 0xFA) {
+        return Some("mp3");
+    }
+    if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WAVE" {
+        return Some("wav");
+    }
+    if bytes.starts_with(b"OggS") {
+        return Some("ogg");
+    }
+    if bytes.starts_with(b"fLaC") {
+        return Some("flac");
+    }
+    if bytes.len() >= 12 && &bytes[4..8] == b"ftyp" {
+        let brand = &bytes[8..12];
+        if brand.starts_with(b"M4A") || brand.starts_with(b"M4B") {
+            return Some("m4a");
+        }
+        if brand.starts_with(b"qt") {
+            return Some("mov");
+        }
+        return Some("mp4");
+    }
+    if bytes.starts_with(&[0x1A, 0x45, 0xDF, 0xA3]) {
+        return Some("webm");
     }
     None
 }
@@ -1325,7 +1550,16 @@ fn serialize_element(builder: &mut Builder, el: ElementRef, out: &mut String) {
     if is_hidden(el) {
         return;
     }
+    emit_private_background_markers(builder, el, out);
     let name = el.value().name();
+    if matches!(name, "mpvoice" | "mp-common-mpaudio") {
+        out.push_str(&escape_html(&format!("音频：{}", voice_label(el))));
+        return;
+    }
+    if matches!(name, "audio" | "video" | "source") {
+        serialize_av(builder, el, out);
+        return;
+    }
     if is_preview_dropped(name) {
         return;
     }
@@ -1349,8 +1583,30 @@ fn serialize_element(builder: &mut Builder, el: ElementRef, out: &mut String) {
     }
 }
 
+fn emit_private_background_markers(builder: &mut Builder, el: ElementRef, out: &mut String) {
+    let Some(style) = el.attr("style") else {
+        return;
+    };
+    for (name, value) in split_declarations(style) {
+        if !is_background_prop(&name) {
+            continue;
+        }
+        for url in css_http_urls(&value) {
+            if builder.register(MediaKind::Image, &url).is_none() {
+                out.push_str(MediaKind::Image.missing_label());
+            }
+        }
+    }
+}
+
 fn serialize_img(builder: &mut Builder, el: ElementRef, out: &mut String) {
-    let Some(Inline::Image { alt, path }) = image_inline(builder, el) else {
+    let Some(inline) = image_inline(builder, el) else {
+        return;
+    };
+    let Inline::Image { alt, path } = inline else {
+        if let Inline::Text(text) = inline {
+            out.push_str(&escape_html(&text));
+        }
         return;
     };
     out.push_str("<img src=\"");
@@ -1367,6 +1623,100 @@ fn serialize_img(builder: &mut Builder, el: ElementRef, out: &mut String) {
         out.push('"');
     }
     out.push('>');
+}
+
+fn serialize_av(builder: &mut Builder, el: ElementRef, out: &mut String) {
+    let name = el.value().name();
+    if name == "source" {
+        serialize_source(builder, el, out);
+        return;
+    }
+    let kind = media_kind(el);
+    let style = sanitize_style(builder, el.attr("style").unwrap_or(""));
+    let poster = if name == "video" {
+        media_attr(el, &["poster", "data-poster"])
+    } else {
+        None
+    };
+    let poster_path = poster
+        .as_deref()
+        .and_then(|url| builder.register(MediaKind::Image, url));
+    if poster.is_some() && poster_path.is_none() {
+        out.push_str(MediaKind::Image.missing_label());
+    }
+    let own = media_attr(el, &["data-src", "src"]);
+    let own_path = own.as_deref().and_then(|url| builder.register(kind, url));
+    if own.is_some() && own_path.is_none() {
+        out.push_str(kind.missing_label());
+    }
+    let mut sources = Vec::new();
+    for child in el.child_elements() {
+        if child.value().name() != "source" || is_hidden(child) {
+            continue;
+        }
+        let Some(url) = media_attr(child, &["src", "data-src"]) else {
+            continue;
+        };
+        if own.as_ref() == Some(&url) {
+            continue;
+        }
+        let path = builder.register(kind, &url);
+        if path.is_none() {
+            out.push_str(kind.missing_label());
+        }
+        sources.push(path);
+    }
+    let playable = own_path.is_some() || sources.iter().any(|path| path.is_some());
+    if !playable {
+        if let Some(path) = &poster_path {
+            out.push_str("<img src=\"");
+            out.push_str(&escape_html(path));
+            out.push_str("\">");
+        }
+        return;
+    }
+    out.push('<');
+    out.push_str(name);
+    if let Some(path) = &poster_path {
+        out.push_str(" poster=\"");
+        out.push_str(&escape_html(path));
+        out.push('"');
+    }
+    if let Some(path) = &own_path {
+        out.push_str(" src=\"");
+        out.push_str(&escape_html(path));
+        out.push('"');
+    }
+    out.push_str(" controls");
+    if let Some(style) = style {
+        out.push_str(" style=\"");
+        out.push_str(&escape_html(&style));
+        out.push('"');
+    }
+    out.push('>');
+    for path in sources.into_iter().flatten() {
+        out.push_str("<source src=\"");
+        out.push_str(&escape_html(&path));
+        out.push_str("\">");
+    }
+    out.push_str("</");
+    out.push_str(name);
+    out.push('>');
+}
+
+fn serialize_source(builder: &mut Builder, el: ElementRef, out: &mut String) {
+    let kind = media_kind(el);
+    let Some(url) = media_attr(el, &["src", "data-src"]) else {
+        return;
+    };
+    match builder.register(kind, &url) {
+        Some(path) => {
+            out.push_str("<source src=\"");
+            out.push_str(&escape_html(&path));
+            out.push_str("\">");
+        }
+        None => out.push_str(kind.missing_label()),
+    }
 }
 
 fn write_preview_attrs(builder: &mut Builder, el: ElementRef, out: &mut String) {
@@ -1681,21 +2031,20 @@ fn rewrite_css_value(value: &str, builder: &mut Builder) -> Option<String> {
         let Some(url) = normalize_img_url(raw.trim()) else {
             return None;
         };
-        if !is_wechat_cdn(&url) {
-            return None;
+        match builder.register(MediaKind::Image, &url) {
+            Some(path) => {
+                out.push_str("url('");
+                out.push_str(&path);
+                out.push_str("')");
+            }
+            None => out.push_str("none"),
         }
-        let Inline::Image { path, .. } = builder.push_image(url, String::new()) else {
-            return None;
-        };
-        out.push_str("url('");
-        out.push_str(&path);
-        out.push_str("')");
     }
     let trimmed = out.trim();
     (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
-fn wechat_urls_in_css(value: &str) -> Vec<String> {
+fn css_http_urls(value: &str) -> Vec<String> {
     let mut urls = Vec::new();
     let mut rest = value;
     loop {
@@ -1709,9 +2058,7 @@ fn wechat_urls_in_css(value: &str) -> Vec<String> {
         };
         rest = next;
         if let Some(url) = normalize_img_url(raw.trim()) {
-            if is_wechat_cdn(&url) {
-                urls.push(url);
-            }
+            urls.push(url);
         }
     }
     urls
@@ -1815,7 +2162,7 @@ let x = 1;
 
 ![示意图](images/img-001.png)
 
-![外链](https://example.com/a.png)
+![外链](images/img-002.png)
 "#;
 
     #[test]
@@ -1829,11 +2176,19 @@ let x = 1;
         assert_eq!(article.digest, "摘要");
         assert_eq!(article.body_markdown, EXPECTED);
         assert!(!article.body_markdown.contains("隐藏"));
-        assert_eq!(article.images.len(), 1);
+        assert!(!article.body_markdown.contains("example.com/a.png"));
+        assert!(article
+            .body_markdown
+            .contains("[文档](https://example.com/docs)"));
+        assert_eq!(article.images.len(), 2);
         assert!(article.images[0].url.contains("wx_fmt=png"));
         assert_eq!(article.images[0].relative_path, "images/img-001.png");
+        assert!(article.images[1].url.contains("example.com/a.png"));
+        assert_eq!(article.images[1].relative_path, "images/img-002.png");
         assert!(article.body_html.contains("<strong>世界</strong>"));
         assert!(article.body_html.contains("src=\"images/img-001.png\""));
+        assert!(article.body_html.contains("src=\"images/img-002.png\""));
+        assert!(!article.body_html.contains("example.com/a.png"));
         let markdown = article.to_markdown();
         assert!(markdown.contains("title: \"示例标题\""));
         assert!(markdown.contains("cover: \"https://mmbiz.qpic.cn/cover/0\""));
@@ -1871,15 +2226,18 @@ let x = 1;
         let article = parse_article(html, "https://mp.weixin.qq.com/s/abc").unwrap();
         assert_eq!(
             article.body_markdown,
-            "1\n\n来了来了！\n\n![图](images/img-001.jpg)\n\n![](images/img-002.png)\n\n2\n\n困\n\n外来背景\n"
+            "1\n\n来了来了！\n\n![图](images/img-001.jpg)\n\n![](images/img-002.png)\n\n2\n\n困\n\n![](images/img-003.png)\n\n外来背景\n"
         );
         assert!(!article.body_markdown.contains("隐藏"));
         assert!(!article.body_markdown.contains("看不见"));
-        assert_eq!(article.images.len(), 2);
+        assert!(!article.body_markdown.contains("example.com"));
+        assert_eq!(article.images.len(), 3);
         assert!(article.images[0].url.contains("wx_fmt=jpeg"));
         assert_eq!(article.images[0].relative_path, "images/img-001.jpg");
         assert!(article.images[1].url.contains("wx_fmt=png"));
         assert_eq!(article.images[1].relative_path, "images/img-002.png");
+        assert!(article.images[2].url.contains("example.com/track.png"));
+        assert_eq!(article.images[2].relative_path, "images/img-003.png");
 
         let preview = &article.body_html;
         let number = preview.find(">1</span>").unwrap();
@@ -1902,6 +2260,7 @@ let x = 1;
         assert!(!preview.contains("看不见"));
         assert!(!preview.contains("onclick"));
         assert!(!preview.contains("alert"));
+        assert!(preview.contains("images/img-003.png"));
         assert!(!preview.contains("example.com"));
         let page = article.to_preview_html();
         assert!(page.contains("class=\"article\""));
@@ -1943,5 +2302,97 @@ let x = 1;
         let url = normalize_img_url("//mmbiz.qpic.cn/a/0?wx_fmt=jpeg").unwrap();
         assert!(url.starts_with("https://mmbiz.qpic.cn/"));
         assert_eq!(ext_from_url(&url), "jpg");
+    }
+
+    #[test]
+    fn public_audio_and_video_use_separate_directories() {
+        let html = r#"<div id="js_content">
+<img src="https://res.wx.qq.com/t/wx_fed/we-emoji/res/assets/newemoji/Watermelon.png" alt="瓜">
+<audio src="https://example.com/talk.mp3"></audio>
+<video poster="https://example.com/cover.jpg" src="https://example.com/clip.mp4">
+<source src="https://cdn.example.com/clip.webm">
+</video>
+<p><a href="https://example.com/docs">文档</a></p>
+<mpvoice name="访谈" voice_encode_fileid="abc"></mpvoice>
+</div>"#;
+        let article = parse_article(html, "https://mp.weixin.qq.com/s/abc").unwrap();
+        assert_eq!(
+            article.body_markdown,
+            "![瓜](images/img-001.png)\n\n[音频](audio/audio-001.mp3)\n\n![](images/img-002.jpg)\n\n[视频](video/video-001.mp4)\n\n[视频](video/video-002.webm)\n\n[文档](https://example.com/docs)\n\n音频：访谈\n"
+        );
+        assert!(!article.body_markdown.contains("res.wx.qq.com"));
+        assert!(!article.body_markdown.contains("talk.mp3"));
+        assert!(!article.body_markdown.contains("cover.jpg"));
+        assert!(!article.body_markdown.contains("clip.mp4"));
+        assert!(!article.body_markdown.contains("clip.webm"));
+        assert!(!article.body_html.contains("res.wx.qq.com"));
+        assert!(!article.body_html.contains("talk.mp3"));
+        assert!(!article.body_html.contains("cover.jpg"));
+        assert!(!article.body_html.contains("clip.mp4"));
+        assert!(!article.body_html.contains("clip.webm"));
+        assert!(article.body_html.contains("src=\"images/img-001.png\""));
+        assert!(article.body_html.contains("src=\"audio/audio-001.mp3\""));
+        assert!(article.body_html.contains("poster=\"images/img-002.jpg\""));
+        assert!(article.body_html.contains("src=\"video/video-001.mp4\""));
+        assert!(article.body_html.contains("src=\"video/video-002.webm\""));
+        assert!(article.body_html.contains("音频：访谈"));
+        assert!(article.body_html.contains("https://example.com/docs"));
+        assert_eq!(article.images.len(), 5);
+        assert_eq!(
+            article
+                .images
+                .iter()
+                .filter(|item| item.url == "https://example.com/clip.mp4")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn same_public_url_is_downloaded_once() {
+        let html = r#"<div id="js_content"><img src="https://example.com/a.png" alt="甲"><p><img src="https://example.com/a.png" alt="乙"></p></div>"#;
+        let article = parse_article(html, "https://mp.weixin.qq.com/s/abc").unwrap();
+        assert_eq!(article.images.len(), 1);
+        assert_eq!(article.images[0].relative_path, "images/img-001.png");
+        assert_eq!(
+            article.body_markdown.matches("images/img-001.png").count(),
+            2
+        );
+    }
+
+    #[test]
+    fn private_media_is_missing_text() {
+        let html = r#"<div id="js_content">
+<img src="http://192.168.1.8/secret.png" alt="内">
+<img src="http://127.0.0.1/a.png">
+<img src="https://files.local/a.png">
+<audio src="http://10.1.2.3/talk.mp3"></audio>
+<video src="http://169.254.1.1/clip.mp4"></video>
+<p style="background-image:url(http://192.168.0.2/x.png)">字</p>
+<p><a href="https://example.com/docs">文档</a></p>
+</div>"#;
+        let article = parse_article(html, "https://mp.weixin.qq.com/s/abc").unwrap();
+        assert!(article.images.is_empty());
+        assert!(article.body_markdown.contains("图片缺失"));
+        assert!(article.body_markdown.contains("音频缺失"));
+        assert!(article.body_markdown.contains("视频缺失"));
+        assert!(article
+            .body_markdown
+            .contains("[文档](https://example.com/docs)"));
+        assert!(!article.body_markdown.contains("192.168"));
+        assert!(!article.body_markdown.contains("127.0.0.1"));
+        assert!(!article.body_markdown.contains("files.local"));
+        assert!(!article.body_markdown.contains("10.1.2.3"));
+        assert!(!article.body_markdown.contains("169.254"));
+        assert!(!article.body_html.contains("192.168"));
+        assert!(!article.body_html.contains("127.0.0.1"));
+        assert!(!article.body_html.contains("files.local"));
+        assert!(!article.body_html.contains("10.1.2.3"));
+        assert!(!article.body_html.contains("169.254"));
+        assert!(article.body_html.contains("图片缺失"));
+        assert!(article.body_html.contains("音频缺失"));
+        assert!(article.body_html.contains("视频缺失"));
+        assert!(article.body_html.contains("none"));
+        assert!(!article.body_html.contains("url("));
     }
 }
