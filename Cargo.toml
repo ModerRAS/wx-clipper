@@ -1,6 +1,6 @@
 [package]
 name = "wx-clipper"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2021"
 description = "把打开的微信公众号和知乎专栏文章保存成本地 Markdown，图片、音频和视频一并下载。"
 license = "MIT"

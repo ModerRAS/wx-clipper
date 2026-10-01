@@ -1,13 +1,18 @@
 // ==UserScript==
 // @name         文章剪藏
 // @namespace    wx-clipper
-// @version      0.2.0
+// @version      0.3.0
 // @description  打开公众号或知乎专栏文章时，把链接发给本地剪藏服务，保存为带本地媒体的 Markdown
 // @match        https://mp.weixin.qq.com/s/*
 // @match        https://mp.weixin.qq.com/s?*
 // @match        https://zhuanlan.zhihu.com/p/*
 // @run-at       document-idle
 // @grant        GM_xmlhttpRequest
+// @grant        GM_getValue
+// @grant        GM_setValue
+// @grant        GM_registerMenuCommand
+// @grant        GM_unregisterMenuCommand
+// @grant        window.close
 // @connect      127.0.0.1
 // @connect      localhost
 // @updateURL    https://raw.githubusercontent.com/ModerRAS/wx-clipper/main/userscript/wx-clipper.user.js
@@ -26,6 +31,26 @@
   const isWechat = page.hostname === "mp.weixin.qq.com" && (page.pathname === "/s" || page.pathname.startsWith("/s/"));
   const isZhihu = page.hostname === "zhuanlan.zhihu.com" && /^\/p\/[^/]+\/?$/.test(page.pathname);
   if (!isWechat && !isZhihu) return;
+
+  const CLOSE_WECHAT_KEY = "closeWechatOnSuccess";
+
+  function closeWechatOnSuccess() {
+    return GM_getValue(CLOSE_WECHAT_KEY, false) === true;
+  }
+
+  function closeMenuTitle() {
+    return closeWechatOnSuccess() ? "公众号剪藏成功后关闭网页：开" : "公众号剪藏成功后关闭网页：关";
+  }
+
+  let closeMenuId = null;
+  function installCloseMenu() {
+    if (closeMenuId !== null) GM_unregisterMenuCommand(closeMenuId);
+    closeMenuId = GM_registerMenuCommand(closeMenuTitle(), () => {
+      GM_setValue(CLOSE_WECHAT_KEY, !closeWechatOnSuccess());
+      installCloseMenu();
+    });
+  }
+  installCloseMenu();
 
   const host = document.createElement("div");
   host.style.cssText = "all: initial; position: fixed; z-index: 2147483647;";
@@ -93,6 +118,7 @@
             preview.href = ORIGIN + data.preview_url;
             preview.hidden = false;
           }
+          if (isWechat && closeWechatOnSuccess()) window.close();
           return;
         }
         setStatus(data.message || `剪藏失败（HTTP ${response.status}）`);
