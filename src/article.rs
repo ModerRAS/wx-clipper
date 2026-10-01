@@ -87,40 +87,20 @@ impl Article {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{title}</title>
 <style>
-  :root {{ color-scheme: light dark; }}
-  body {{ margin: 0; background: #f4f1ea; color: #1c1915; font: 18px/1.75 "Iowan Old Style", Palatino, "Songti SC", "Noto Serif SC", serif; }}
-  main {{ max-width: 42rem; margin: 0 auto; padding: 48px 20px 96px; }}
-  h1 {{ font-size: 2rem; line-height: 1.25; margin: 0 0 0.6rem; letter-spacing: -0.02em; }}
-  h2, h3, h4 {{ line-height: 1.35; margin: 1.6em 0 0.6em; }}
-  .meta {{ color: #6d665c; font: 14px/1.6 "Segoe UI", "PingFang SC", "Noto Sans SC", sans-serif; margin: 0 0 2rem; }}
-  .meta a {{ color: #0b6b4f; }}
-  img {{ max-width: 100%; height: auto; }}
-  p img {{ display: block; margin: 1rem auto; }}
-  pre {{ background: #242220; color: #f3efe6; padding: 14px 16px; overflow: auto; border-radius: 10px; font: 13px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }}
-  code {{ font: inherit; }}
-  p code, li code {{ background: #e7e1d6; padding: 0.1em 0.35em; border-radius: 4px; font-size: 0.9em; }}
-  blockquote {{ margin: 1.2rem 0; padding: 0.2rem 0 0.2rem 1rem; border-left: 3px solid #c8bfb0; color: #3f3a34; }}
-  a {{ color: #0b6b4f; }}
-  table {{ border-collapse: collapse; width: 100%; font-size: 0.95rem; }}
-  th, td {{ border: 1px solid #d9d1c5; padding: 6px 10px; text-align: left; vertical-align: top; }}
-  th {{ background: #e7e0d6; }}
-  @media (prefers-color-scheme: dark) {{
-    body {{ background: #1b1916; color: #f3efe6; }}
-    .meta {{ color: #b7b0a4; }}
-    .meta a, a {{ color: #8dcfb0; }}
-    pre {{ background: #11100e; }}
-    p code, li code {{ background: #2c2925; }}
-    blockquote {{ border-color: #5c564c; color: #e4ded3; }}
-    th, td {{ border-color: #3c3832; }}
-    th {{ background: #2a2723; }}
-  }}
+  body {{ margin: 0; background: #f4f4f4; color: #222; font: 16px/1.6 "PingFang SC", "Hiragino Sans GB", "Noto Sans SC", sans-serif; }}
+  main {{ max-width: 677px; margin: 0 auto; padding: 28px 16px 80px; background: #fff; }}
+  .title {{ font-size: 1.55rem; line-height: 1.35; margin: 0 0 0.6rem; }}
+  .meta {{ color: #888; font-size: 14px; line-height: 1.6; margin: 0 0 1.5rem; }}
+  .meta a {{ color: #576b95; }}
+  .article {{ overflow-wrap: break-word; }}
+  .article img {{ max-width: 100%; }}
 </style>
 </head>
 <body>
 <main>
-  <h1>{title}</h1>
+  <h1 class="title">{title}</h1>
   <p class="meta">{meta}<br><a href="{source}">原文</a></p>
-  {body}
+  <div class="article">{body}</div>
 </main>
 </body>
 </html>
@@ -156,9 +136,9 @@ pub fn parse_article(html: &str, source_url: &str) -> Result<Article, ParseError
         .ok_or(ParseError::NoContent)?;
 
     let mut builder = Builder::default();
+    let body_html = serialize_preview(&mut builder, content);
     let blocks = render_children_blocks(&mut builder, content);
     let body_markdown = join_markdown(&blocks);
-    let body_html = join_html(&blocks);
     if body_markdown.trim().is_empty() && builder.images.is_empty() {
         return Err(ParseError::NoContent);
     }
@@ -359,18 +339,46 @@ fn render_element(builder: &mut Builder, el: ElementRef) -> Vec<Block> {
     if is_hidden(el) {
         return Vec::new();
     }
+    let mut blocks = background_blocks(builder, el);
+    blocks.extend(render_element_body(builder, el));
+    blocks
+}
+
+fn render_element_body(builder: &mut Builder, el: ElementRef) -> Vec<Block> {
     let name = el.value().name();
+    if is_horizontal_row(el) {
+        return render_row_children(builder, el);
+    }
     match name {
         "script" | "style" | "noscript" | "button" | "svg" | "form" | "input" | "textarea"
         | "canvas" | "iframe" => embed_or_empty(el),
         "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => {
             let level = name.as_bytes()[1] - b'0';
-            let inlines = render_inline_children(builder, el);
-            if inline_is_empty(&inlines) {
-                Vec::new()
-            } else {
-                vec![Block::Heading { level, inlines }]
+            let inlines = hoist_images(flatten_spans(render_inline_children(builder, el)));
+            let mut blocks = Vec::new();
+            let mut buf = Vec::new();
+            for inline in inlines {
+                if matches!(inline, Inline::Image { .. }) {
+                    if !inline_is_empty(&buf) {
+                        blocks.push(Block::Heading {
+                            level,
+                            inlines: std::mem::take(&mut buf),
+                        });
+                    } else {
+                        buf.clear();
+                    }
+                    blocks.push(Block::Paragraph(vec![inline]));
+                } else {
+                    buf.push(inline);
+                }
             }
+            if !inline_is_empty(&buf) {
+                blocks.push(Block::Heading {
+                    level,
+                    inlines: buf,
+                });
+            }
+            blocks
         }
         "pre" => {
             let (lang, text) = code_block(el);
@@ -418,12 +426,43 @@ fn render_element(builder: &mut Builder, el: ElementRef) -> Vec<Block> {
     }
 }
 
+fn render_row_children(builder: &mut Builder, el: ElementRef) -> Vec<Block> {
+    let mut blocks = Vec::new();
+    for child in el.children() {
+        match child.value() {
+            Node::Text(text) => {
+                let inlines = text_inlines(text);
+                if inline_is_empty(&inlines) {
+                    continue;
+                }
+                blocks.extend(blocks_from_inlines(inlines));
+            }
+            Node::Element(_) => {
+                let Some(child_el) = ElementRef::wrap(child) else {
+                    continue;
+                };
+                if is_hidden(child_el) {
+                    continue;
+                }
+                let name = child_el.value().name();
+                if is_horizontal_row(child_el) || !is_inline_tag(name) {
+                    blocks.extend(render_element(builder, child_el));
+                } else if let Some(inline) = render_inline_element(builder, child_el) {
+                    blocks.extend(blocks_from_inlines(vec![inline]));
+                }
+            }
+            _ => {}
+        }
+    }
+    blocks
+}
+
 fn paragraph(inlines: Vec<Inline>) -> Vec<Block> {
     blocks_from_inlines(inlines)
 }
 
 fn blocks_from_inlines(inlines: Vec<Inline>) -> Vec<Block> {
-    let inlines = flatten_spans(inlines);
+    let inlines = hoist_images(flatten_spans(inlines));
     let mut blocks = Vec::new();
     let mut buf = Vec::new();
     for inline in inlines {
@@ -436,6 +475,48 @@ fn blocks_from_inlines(inlines: Vec<Inline>) -> Vec<Block> {
     }
     push_text_paragraph(&mut buf, &mut blocks);
     blocks
+}
+
+fn hoist_images(inlines: Vec<Inline>) -> Vec<Inline> {
+    let mut out = Vec::new();
+    for inline in inlines {
+        out.extend(hoist_one(inline));
+    }
+    out
+}
+
+fn hoist_one(inline: Inline) -> Vec<Inline> {
+    match inline {
+        Inline::Bold(children) => split_marked(children, Inline::Bold),
+        Inline::Italic(children) => split_marked(children, Inline::Italic),
+        Inline::Span(children) => hoist_images(children),
+        Inline::Link { href, children } => split_marked(children, |inner| Inline::Link {
+            href: href.clone(),
+            children: inner,
+        }),
+        other => vec![other],
+    }
+}
+
+fn split_marked(children: Vec<Inline>, wrap: impl Fn(Vec<Inline>) -> Inline) -> Vec<Inline> {
+    let mut out = Vec::new();
+    let mut buf = Vec::new();
+    for child in hoist_images(children) {
+        if matches!(child, Inline::Image { .. }) {
+            if !inline_is_empty(&buf) {
+                out.push(wrap(std::mem::take(&mut buf)));
+            } else {
+                buf.clear();
+            }
+            out.push(child);
+        } else {
+            buf.push(child);
+        }
+    }
+    if !inline_is_empty(&buf) {
+        out.push(wrap(buf));
+    }
+    out
 }
 
 fn flatten_spans(inlines: Vec<Inline>) -> Vec<Inline> {
@@ -771,13 +852,58 @@ fn is_hidden(el: ElementRef) -> bool {
     let Some(style) = el.attr("style") else {
         return false;
     };
-    style.split(';').any(|part| {
-        let mut pieces = part.splitn(2, ':');
-        let key = pieces.next().unwrap_or("").trim();
-        let value = pieces.next().unwrap_or("").trim();
+    split_declarations(style).into_iter().any(|(key, value)| {
         let value = value.split('!').next().unwrap_or("").trim();
-        key.eq_ignore_ascii_case("display") && value.eq_ignore_ascii_case("none")
+        (key.eq_ignore_ascii_case("display") && value.eq_ignore_ascii_case("none"))
+            || (key.eq_ignore_ascii_case("visibility") && value.eq_ignore_ascii_case("hidden"))
     })
+}
+
+fn is_horizontal_row(el: ElementRef) -> bool {
+    if !matches!(
+        el.value().name(),
+        "section" | "div" | "p" | "article" | "span" | "figure"
+    ) {
+        return false;
+    }
+    let Some(style) = el.attr("style") else {
+        return false;
+    };
+    split_declarations(style).into_iter().any(|(name, value)| {
+        if !name.eq_ignore_ascii_case("display") {
+            return false;
+        }
+        let value = value
+            .split('!')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase();
+        value.split_whitespace().any(|token| {
+            matches!(
+                token,
+                "flex" | "inline-flex" | "-webkit-flex" | "-webkit-box"
+            )
+        })
+    })
+}
+
+fn background_blocks(builder: &mut Builder, el: ElementRef) -> Vec<Block> {
+    let Some(style) = el.attr("style") else {
+        return Vec::new();
+    };
+    let mut blocks = Vec::new();
+    for (name, value) in split_declarations(style) {
+        if !is_background_prop(&name) {
+            continue;
+        }
+        for url in wechat_urls_in_css(&value) {
+            blocks.push(Block::Paragraph(vec![
+                builder.push_image(url, String::new())
+            ]));
+        }
+    }
+    blocks
 }
 
 fn is_inline_tag(name: &str) -> bool {
@@ -852,14 +978,6 @@ fn join_markdown(blocks: &[Block]) -> String {
         }
     }
     finish_text(&out)
-}
-
-fn join_html(blocks: &[Block]) -> String {
-    let mut out = String::new();
-    for block in blocks {
-        out.push_str(&emit_html_block(block));
-    }
-    out
 }
 
 fn finish_text(value: &str) -> String {
@@ -1018,113 +1136,6 @@ fn wrap_affix(mark: &str, inner: &str) -> String {
         String::new()
     } else {
         format!("{mark}{inner}{mark}")
-    }
-}
-
-fn emit_html_block(block: &Block) -> String {
-    match block {
-        Block::Paragraph(inlines) => {
-            let inner = emit_html_inlines(inlines).trim().to_string();
-            if inner.is_empty() {
-                String::new()
-            } else {
-                format!("<p>{inner}</p>\n")
-            }
-        }
-        Block::Heading { level, inlines } => {
-            let text = emit_html_inlines(inlines).trim().to_string();
-            if text.is_empty() {
-                String::new()
-            } else {
-                format!("<h{level}>{text}</h{level}>\n")
-            }
-        }
-        Block::Code { lang, text } => {
-            if lang.is_empty() {
-                format!("<pre><code>{}</code></pre>\n", escape_html(text))
-            } else {
-                format!(
-                    "<pre><code class=\"language-{lang}\">{}</code></pre>\n",
-                    escape_html(text)
-                )
-            }
-        }
-        Block::List { ordered, items } => {
-            let tag = if *ordered { "ol" } else { "ul" };
-            let mut out = format!("<{tag}>\n");
-            for item in items {
-                out.push_str("<li>\n");
-                out.push_str(&join_html(item));
-                out.push_str("</li>\n");
-            }
-            out.push_str(&format!("</{tag}>\n"));
-            out
-        }
-        Block::Quote(inner) => format!("<blockquote>\n{}</blockquote>\n", join_html(inner)),
-        Block::Table { rows } => emit_html_table(rows),
-        Block::Rule => "<hr>\n".into(),
-    }
-}
-
-fn emit_html_table(rows: &[Vec<Vec<Inline>>]) -> String {
-    if rows.is_empty() {
-        return String::new();
-    }
-    let mut out = String::from("<table>\n");
-    for (index, row) in rows.iter().enumerate() {
-        let cell = if index == 0 { "th" } else { "td" };
-        out.push_str("<tr>");
-        for item in row {
-            out.push('<');
-            out.push_str(cell);
-            out.push('>');
-            out.push_str(emit_html_inlines(item).trim());
-            out.push_str("</");
-            out.push_str(cell);
-            out.push('>');
-        }
-        out.push_str("</tr>\n");
-    }
-    out.push_str("</table>\n");
-    out
-}
-
-fn emit_html_inlines(inlines: &[Inline]) -> String {
-    let mut out = String::new();
-    for inline in inlines {
-        out.push_str(&emit_html_inline(inline));
-    }
-    out
-}
-
-fn emit_html_inline(inline: &Inline) -> String {
-    match inline {
-        Inline::Text(text) => escape_html(text),
-        Inline::Bold(children) => {
-            format!("<strong>{}</strong>", emit_html_inlines(children).trim())
-        }
-        Inline::Italic(children) => format!("<em>{}</em>", emit_html_inlines(children).trim()),
-        Inline::Code(text) => format!("<code>{}</code>", escape_html(text)),
-        Inline::Link { href, children } => {
-            let text = emit_html_inlines(children).trim().to_string();
-            let text = if text.is_empty() {
-                escape_html(href)
-            } else {
-                text
-            };
-            format!(
-                "<a href=\"{}\">{}</a>",
-                escape_html(&markdown_dest(href)),
-                text
-            )
-        }
-        Inline::Image { alt, path } => format!(
-            "<img src=\"{}\" alt=\"{}\">",
-            escape_html(path),
-            escape_html(alt)
-        ),
-        Inline::LineBreak => "<br>\n".into(),
-        Inline::Span(children) => emit_html_inlines(children),
     }
 }
 
@@ -1289,6 +1300,491 @@ pub fn sniff_ext(bytes: &[u8]) -> Option<&'static str> {
     None
 }
 
+fn serialize_preview(builder: &mut Builder, root: ElementRef) -> String {
+    let mut out = String::new();
+    serialize_children(builder, root, &mut out);
+    out
+}
+
+fn serialize_children(builder: &mut Builder, el: ElementRef, out: &mut String) {
+    for child in el.children() {
+        match child.value() {
+            Node::Text(text) => out.push_str(&escape_html(text)),
+            Node::Element(_) => {
+                let Some(child_el) = ElementRef::wrap(child) else {
+                    continue;
+                };
+                serialize_element(builder, child_el, out);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn serialize_element(builder: &mut Builder, el: ElementRef, out: &mut String) {
+    if is_hidden(el) {
+        return;
+    }
+    let name = el.value().name();
+    if is_preview_dropped(name) {
+        return;
+    }
+    if !is_preview_tag(name) {
+        serialize_children(builder, el, out);
+        return;
+    }
+    if name == "img" {
+        serialize_img(builder, el, out);
+        return;
+    }
+    out.push('<');
+    out.push_str(name);
+    write_preview_attrs(builder, el, out);
+    out.push('>');
+    if !matches!(name, "br" | "hr") {
+        serialize_children(builder, el, out);
+        out.push_str("</");
+        out.push_str(name);
+        out.push('>');
+    }
+}
+
+fn serialize_img(builder: &mut Builder, el: ElementRef, out: &mut String) {
+    let Some(Inline::Image { alt, path }) = image_inline(builder, el) else {
+        return;
+    };
+    out.push_str("<img src=\"");
+    out.push_str(&escape_html(&path));
+    out.push('"');
+    if !alt.is_empty() {
+        out.push_str(" alt=\"");
+        out.push_str(&escape_html(&alt));
+        out.push('"');
+    }
+    if let Some(style) = sanitize_style(builder, el.attr("style").unwrap_or("")) {
+        out.push_str(" style=\"");
+        out.push_str(&escape_html(&style));
+        out.push('"');
+    }
+    out.push('>');
+}
+
+fn write_preview_attrs(builder: &mut Builder, el: ElementRef, out: &mut String) {
+    let name = el.value().name();
+    if let Some(style) = sanitize_style(builder, el.attr("style").unwrap_or("")) {
+        out.push_str(" style=\"");
+        out.push_str(&escape_html(&style));
+        out.push('"');
+    }
+    if name == "a" {
+        if let Some(href) = el.attr("href").and_then(normalize_href) {
+            out.push_str(" href=\"");
+            out.push_str(&escape_html(&href));
+            out.push('"');
+        }
+    }
+    if matches!(name, "td" | "th") {
+        for key in ["colspan", "rowspan"] {
+            if let Some(value) = el.attr(key) {
+                if value.bytes().all(|byte| byte.is_ascii_digit())
+                    && !value.is_empty()
+                    && value.len() <= 3
+                {
+                    out.push(' ');
+                    out.push_str(key);
+                    out.push_str("=\"");
+                    out.push_str(value);
+                    out.push('"');
+                }
+            }
+        }
+    }
+    if name == "font" {
+        if let Some(color) = el.attr("color") {
+            if color.len() <= 32 && !color.contains(['"', '\'', '<', '>', '(', ')', ';']) {
+                out.push_str(" color=\"");
+                out.push_str(&escape_html(color));
+                out.push('"');
+            }
+        }
+    }
+    if is_svg_tag(name) {
+        for (key, value) in el.value().attrs() {
+            if let Some(attr) = svg_attr_name(key) {
+                out.push(' ');
+                out.push_str(attr);
+                out.push_str("=\"");
+                out.push_str(&escape_html(value));
+                out.push('"');
+            }
+        }
+    }
+}
+
+fn is_preview_dropped(name: &str) -> bool {
+    matches!(
+        name,
+        "script"
+            | "style"
+            | "noscript"
+            | "button"
+            | "form"
+            | "input"
+            | "textarea"
+            | "canvas"
+            | "iframe"
+    )
+}
+
+fn is_preview_tag(name: &str) -> bool {
+    matches!(
+        name,
+        "section"
+            | "div"
+            | "p"
+            | "span"
+            | "strong"
+            | "b"
+            | "em"
+            | "i"
+            | "u"
+            | "s"
+            | "del"
+            | "sub"
+            | "sup"
+            | "font"
+            | "a"
+            | "img"
+            | "br"
+            | "h1"
+            | "h2"
+            | "h3"
+            | "h4"
+            | "h5"
+            | "h6"
+            | "ul"
+            | "ol"
+            | "li"
+            | "blockquote"
+            | "pre"
+            | "code"
+            | "table"
+            | "thead"
+            | "tbody"
+            | "tfoot"
+            | "tr"
+            | "th"
+            | "td"
+            | "hr"
+            | "figure"
+            | "figcaption"
+    ) || is_svg_tag(name)
+}
+
+fn is_svg_tag(name: &str) -> bool {
+    matches!(
+        name,
+        "svg"
+            | "g"
+            | "path"
+            | "circle"
+            | "rect"
+            | "ellipse"
+            | "line"
+            | "polyline"
+            | "polygon"
+            | "text"
+            | "tspan"
+            | "defs"
+            | "title"
+            | "lineargradient"
+            | "radialgradient"
+            | "stop"
+    )
+}
+
+fn svg_attr_name(name: &str) -> Option<&'static str> {
+    match name {
+        "viewbox" => Some("viewBox"),
+        "preserveaspectratio" => Some("preserveAspectRatio"),
+        "stroke-width" => Some("stroke-width"),
+        "fill" => Some("fill"),
+        "stroke" => Some("stroke"),
+        "d" => Some("d"),
+        "cx" => Some("cx"),
+        "cy" => Some("cy"),
+        "r" => Some("r"),
+        "rx" => Some("rx"),
+        "ry" => Some("ry"),
+        "x" => Some("x"),
+        "y" => Some("y"),
+        "x1" => Some("x1"),
+        "y1" => Some("y1"),
+        "x2" => Some("x2"),
+        "y2" => Some("y2"),
+        "points" => Some("points"),
+        "transform" => Some("transform"),
+        "opacity" => Some("opacity"),
+        "fill-opacity" => Some("fill-opacity"),
+        "stroke-opacity" => Some("stroke-opacity"),
+        "font-size" => Some("font-size"),
+        "text-anchor" => Some("text-anchor"),
+        "dx" => Some("dx"),
+        "dy" => Some("dy"),
+        "offset" => Some("offset"),
+        "stop-color" => Some("stop-color"),
+        "width" => Some("width"),
+        "height" => Some("height"),
+        "xmlns" => Some("xmlns"),
+        "role" => Some("role"),
+        _ => None,
+    }
+}
+
+fn sanitize_style(builder: &mut Builder, style: &str) -> Option<String> {
+    let mut kept = Vec::new();
+    for (name, value) in split_declarations(style) {
+        if !style_prop_allowed(&name) {
+            continue;
+        }
+        let Some(value) = rewrite_css_value(&value, builder) else {
+            continue;
+        };
+        kept.push(format!("{}:{}", name.to_ascii_lowercase(), value));
+    }
+    if kept.is_empty() {
+        None
+    } else {
+        Some(kept.join(";"))
+    }
+}
+
+fn style_prop_allowed(name: &str) -> bool {
+    let name = name.trim().to_ascii_lowercase();
+    if matches!(
+        name.as_str(),
+        "color"
+            | "letter-spacing"
+            | "line-height"
+            | "text-align"
+            | "text-decoration"
+            | "text-indent"
+            | "vertical-align"
+            | "white-space"
+            | "word-break"
+            | "word-wrap"
+            | "overflow"
+            | "overflow-wrap"
+            | "box-shadow"
+            | "box-sizing"
+            | "clear"
+            | "float"
+            | "opacity"
+            | "visibility"
+            | "display"
+            | "position"
+            | "top"
+            | "right"
+            | "bottom"
+            | "left"
+            | "z-index"
+            | "outline"
+            | "gap"
+            | "row-gap"
+            | "column-gap"
+            | "align-items"
+            | "align-self"
+            | "align-content"
+            | "justify-content"
+            | "justify-items"
+            | "flex"
+            | "flex-basis"
+            | "flex-grow"
+            | "flex-shrink"
+            | "flex-direction"
+            | "flex-wrap"
+            | "flex-flow"
+            | "width"
+            | "height"
+            | "max-width"
+            | "min-width"
+            | "max-height"
+            | "min-height"
+            | "font"
+            | "font-size"
+            | "font-family"
+            | "font-weight"
+            | "font-style"
+            | "border"
+            | "border-radius"
+            | "background"
+            | "background-color"
+            | "background-image"
+            | "background-size"
+            | "background-repeat"
+            | "background-position"
+            | "background-origin"
+            | "margin"
+            | "padding"
+            | "-webkit-box-flex"
+            | "-webkit-box-orient"
+            | "-webkit-box-align"
+            | "-webkit-box-pack"
+            | "-webkit-box-direction"
+            | "-webkit-flex"
+            | "-webkit-flex-direction"
+            | "-webkit-justify-content"
+            | "-webkit-align-items"
+            | "-webkit-tap-highlight-color"
+    ) {
+        return true;
+    }
+    let bare = name.strip_prefix("-webkit-").unwrap_or(&name);
+    bare.starts_with("margin-")
+        || bare.starts_with("padding-")
+        || bare.starts_with("border-")
+        || bare.starts_with("background-")
+        || bare.starts_with("flex-")
+        || bare.starts_with("font-")
+}
+
+fn is_background_prop(name: &str) -> bool {
+    let name = name.trim().to_ascii_lowercase();
+    name == "background" || name.starts_with("background-")
+}
+
+fn rewrite_css_value(value: &str, builder: &mut Builder) -> Option<String> {
+    let lower = value.to_ascii_lowercase();
+    if lower.contains("expression(")
+        || lower.contains("javascript:")
+        || lower.contains("behavior:")
+        || lower.contains("@import")
+    {
+        return None;
+    }
+    if !lower.contains("url(") {
+        let trimmed = value.trim();
+        return (!trimmed.is_empty()).then(|| trimmed.to_string());
+    }
+    let mut out = String::new();
+    let mut rest = value;
+    loop {
+        let lower_rest = rest.to_ascii_lowercase();
+        let Some(index) = lower_rest.find("url(") else {
+            out.push_str(rest);
+            break;
+        };
+        out.push_str(&rest[..index]);
+        rest = &rest[index + 4..];
+        let (raw, next) = split_css_url(rest)?;
+        rest = next;
+        let Some(url) = normalize_img_url(raw.trim()) else {
+            return None;
+        };
+        if !is_wechat_cdn(&url) {
+            return None;
+        }
+        let Inline::Image { path, .. } = builder.push_image(url, String::new()) else {
+            return None;
+        };
+        out.push_str("url('");
+        out.push_str(&path);
+        out.push_str("')");
+    }
+    let trimmed = out.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+fn wechat_urls_in_css(value: &str) -> Vec<String> {
+    let mut urls = Vec::new();
+    let mut rest = value;
+    loop {
+        let lower_rest = rest.to_ascii_lowercase();
+        let Some(index) = lower_rest.find("url(") else {
+            break;
+        };
+        rest = &rest[index + 4..];
+        let Some((raw, next)) = split_css_url(rest) else {
+            break;
+        };
+        rest = next;
+        if let Some(url) = normalize_img_url(raw.trim()) {
+            if is_wechat_cdn(&url) {
+                urls.push(url);
+            }
+        }
+    }
+    urls
+}
+
+fn split_css_url(rest: &str) -> Option<(&str, &str)> {
+    let rest = rest.trim_start();
+    let mut chars = rest.char_indices();
+    let (_, first) = chars.next()?;
+    if first == '"' || first == '\'' {
+        let mut end = None;
+        for (index, ch) in chars {
+            if ch == first {
+                end = Some(index);
+                break;
+            }
+        }
+        let end = end?;
+        let body = &rest[first.len_utf8()..end];
+        let after = rest[end + first.len_utf8()..].trim_start();
+        let after = after.strip_prefix(')')?;
+        return Some((body, after));
+    }
+    let end = rest.find(')')?;
+    Some((&rest[..end], &rest[end + 1..]))
+}
+
+fn split_declarations(style: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let mut current = String::new();
+    let mut depth = 0;
+    let mut quote = None;
+    for ch in style.chars() {
+        match ch {
+            '\'' | '"' if quote == Some(ch) => {
+                quote = None;
+                current.push(ch);
+            }
+            '\'' | '"' if quote.is_none() => {
+                quote = Some(ch);
+                current.push(ch);
+            }
+            '(' if quote.is_none() => {
+                depth += 1;
+                current.push(ch);
+            }
+            ')' if quote.is_none() && depth > 0 => {
+                depth -= 1;
+                current.push(ch);
+            }
+            ';' if quote.is_none() && depth == 0 => {
+                push_declaration(&mut out, &current);
+                current.clear();
+            }
+            _ => current.push(ch),
+        }
+    }
+    push_declaration(&mut out, &current);
+    out
+}
+
+fn push_declaration(out: &mut Vec<(String, String)>, raw: &str) {
+    let Some((name, value)) = raw.split_once(':') else {
+        return;
+    };
+    let name = name.trim();
+    let value = value.trim();
+    if name.is_empty() || value.is_empty() {
+        return;
+    }
+    out.push((name.to_string(), value.to_string()));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1342,6 +1838,75 @@ let x = 1;
         assert!(markdown.contains("title: \"示例标题\""));
         assert!(markdown.contains("cover: \"https://mmbiz.qpic.cn/cover/0\""));
         assert!(markdown.starts_with("---\n"));
+    }
+
+    #[test]
+    fn image_inside_bold_is_not_wrapped_in_markers() {
+        let html = r#"<div id="js_content"><p><strong><strong><img data-src="https://mmbiz.qpic.cn/mmbiz_png/abc/640?wx_fmt=png" alt="图"></strong>来了来了！</strong></p></div>"#;
+        let article = parse_article(html, "https://mp.weixin.qq.com/s/abc").unwrap();
+        assert_eq!(
+            article.body_markdown,
+            "![图](images/img-001.png)\n\n**来了来了！**\n"
+        );
+        assert!(!article.body_markdown.contains("**!["));
+    }
+
+    #[test]
+    fn keeps_flex_card_and_background_image() {
+        let html = r#"<div id="js_content">
+<section style="display:flex;color:rgb(34, 34, 34)">
+  <span style="flex:0 0 2cm">1</span>
+  <span style="flex:1 1 auto" onclick="alert(1)">来了来了！</span>
+  <img data-src="https://mmbiz.qpic.cn/mmbiz_jpg/card/0?wx_fmt=jpeg" alt="图">
+</section>
+<section style="display:flex;background-image:url(https://mmbiz.qpic.cn/mmbiz_png/bg/0?wx_fmt=png)">
+  <span>2</span>
+  <span>困</span>
+</section>
+<script>alert(1)</script>
+<p style="display:none">隐藏</p>
+<p style="visibility:hidden">看不见</p>
+<p style="background-image:url(https://example.com/track.png)">外来背景</p>
+</div>"#;
+        let article = parse_article(html, "https://mp.weixin.qq.com/s/abc").unwrap();
+        assert_eq!(
+            article.body_markdown,
+            "1\n\n来了来了！\n\n![图](images/img-001.jpg)\n\n![](images/img-002.png)\n\n2\n\n困\n\n外来背景\n"
+        );
+        assert!(!article.body_markdown.contains("隐藏"));
+        assert!(!article.body_markdown.contains("看不见"));
+        assert_eq!(article.images.len(), 2);
+        assert!(article.images[0].url.contains("wx_fmt=jpeg"));
+        assert_eq!(article.images[0].relative_path, "images/img-001.jpg");
+        assert!(article.images[1].url.contains("wx_fmt=png"));
+        assert_eq!(article.images[1].relative_path, "images/img-002.png");
+
+        let preview = &article.body_html;
+        let number = preview.find(">1</span>").unwrap();
+        let caption = preview.find("来了来了！").unwrap();
+        let photo = preview.find("images/img-001.jpg").unwrap();
+        let background = preview.find("images/img-002.png").unwrap();
+        let second = preview.find(">2</span>").unwrap();
+        let third = preview.find("困").unwrap();
+        assert!(
+            number < caption
+                && caption < photo
+                && photo < background
+                && background < second
+                && second < third
+        );
+        assert!(preview.contains("display:flex"));
+        assert!(preview.contains("flex:0 0 2cm"));
+        assert!(preview.contains("color:rgb(34, 34, 34)"));
+        assert!(!preview.contains("隐藏"));
+        assert!(!preview.contains("看不见"));
+        assert!(!preview.contains("onclick"));
+        assert!(!preview.contains("alert"));
+        assert!(!preview.contains("example.com"));
+        let page = article.to_preview_html();
+        assert!(page.contains("class=\"article\""));
+        assert!(page.contains("max-width: 677px"));
+        assert!(!page.contains("p img"));
     }
 
     #[test]
