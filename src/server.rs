@@ -1,4 +1,5 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use axum::extract::{DefaultBodyLimit, State};
@@ -21,6 +22,13 @@ pub struct AppState {
     pub origin: String,
     pub client: reqwest::Client,
     pub lock: Mutex<()>,
+    pub close_wechat_tab: AtomicBool,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct SettingsBody {
+    #[serde(default)]
+    close_wechat_tab: bool,
 }
 
 #[derive(Deserialize)]
@@ -76,6 +84,7 @@ pub async fn serve(
 ) -> Result<(), std::io::Error> {
     tokio::fs::create_dir_all(&output).await?;
     let state = Arc::new(AppState {
+        close_wechat_tab: AtomicBool::new(read_close_wechat_tab(&output)),
         output: output.clone(),
         origin,
         client: build_client(),
@@ -91,10 +100,13 @@ pub async fn serve(
         .route("/wx-clipper.user.js", get(userscript))
         .route("/api/clip", post(clip))
         .route("/api/clips", get(list_clips))
+        .route("/api/settings", get(get_settings).post(set_settings))
         .nest_service("/files", ServeDir::new(output))
         .layer(DefaultBodyLimit::max(20 * 1024 * 1024))
-        .layer(cors)
-        .with_state(state);
+        .layer(cors);
+    #[cfg(windows)]
+    crate::wechat_watch::start(state.clone());
+    let app = app.with_state(state);
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown)
@@ -146,6 +158,52 @@ async fn clip(State(state): State<Arc<AppState>>, Json(req): Json<ClipRequest>) 
     }
 }
 
+async fn get_settings(State(state): State<Arc<AppState>>) -> Json<SettingsBody> {
+    Json(SettingsBody {
+        close_wechat_tab: state.close_wechat_tab.load(Ordering::Relaxed),
+    })
+}
+
+async fn set_settings(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<SettingsBody>,
+) -> Response {
+    if let Err(err) = write_close_wechat_tab(&state.output, body.close_wechat_tab).await {
+        return (StatusCode::INTERNAL_SERVER_ERROR, err).into_response();
+    }
+    state
+        .close_wechat_tab
+        .store(body.close_wechat_tab, Ordering::Relaxed);
+    Json(body).into_response()
+}
+
+fn settings_path(output: &Path) -> PathBuf {
+    output.join("settings.json")
+}
+
+fn read_close_wechat_tab(output: &Path) -> bool {
+    std::fs::read_to_string(settings_path(output))
+        .ok()
+        .map(|text| close_wechat_tab_from_json(&text))
+        .unwrap_or(false)
+}
+
+pub(crate) fn close_wechat_tab_from_json(text: &str) -> bool {
+    serde_json::from_str::<SettingsBody>(text)
+        .map(|body| body.close_wechat_tab)
+        .unwrap_or(false)
+}
+
+async fn write_close_wechat_tab(output: &Path, enabled: bool) -> Result<(), String> {
+    let bytes = serde_json::to_vec_pretty(&SettingsBody {
+        close_wechat_tab: enabled,
+    })
+    .map_err(|err| err.to_string())?;
+    tokio::fs::write(settings_path(output), bytes)
+        .await
+        .map_err(|err| err.to_string())
+}
+
 async fn list_clips(State(state): State<Arc<AppState>>) -> Response {
     match store::list_records(&state.output).await {
         Ok(records) => {
@@ -195,6 +253,26 @@ impl ClipResponse {
             image_failed: 0,
             need_html: err.need_html(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::close_wechat_tab_from_json;
+
+    #[test]
+    fn missing_settings_keep_wechat_tab_open() {
+        assert!(!close_wechat_tab_from_json(""));
+        assert!(!close_wechat_tab_from_json("{}"));
+        assert!(!close_wechat_tab_from_json("not json"));
+    }
+
+    #[test]
+    fn settings_remember_closing_the_wechat_tab() {
+        assert!(close_wechat_tab_from_json(r#"{"close_wechat_tab":true}"#));
+        assert!(!close_wechat_tab_from_json(
+            r#"{"close_wechat_tab":false}"#
+        ));
     }
 }
 

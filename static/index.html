@@ -105,6 +105,7 @@
         <li>打开 <a href="/wx-clipper.user.js">油猴脚本</a>，按提示安装。</li>
         <li>之后打开公众号或知乎专栏文章，右下角会出现剪藏状态。</li>
       </ol>
+      <label class="check" style="margin-top: 12px"><input id="close-wechat-tab" type="checkbox"> 剪藏成功后关闭微信内置浏览器页面</label>
     </section>
   </div>
   <section class="card" id="list-card">
@@ -327,7 +328,34 @@ reclip.addEventListener("click", async () => {
   }
 });
 
+const closeWechatTab = document.querySelector("#close-wechat-tab");
+
+async function loadSettings() {
+  try {
+    const response = await fetch("/api/settings");
+    if (!response.ok) return;
+    const data = await response.json();
+    closeWechatTab.checked = Boolean(data.close_wechat_tab);
+  } catch (error) {}
+}
+
+closeWechatTab.addEventListener("change", async () => {
+  const enabled = closeWechatTab.checked;
+  try {
+    const response = await fetch("/api/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ close_wechat_tab: enabled }),
+    });
+    if (!response.ok) throw new Error("save");
+  } catch (error) {
+    closeWechatTab.checked = !enabled;
+    showBanner("设置没有保存。", true);
+  }
+});
+
 loadClips();
+loadSettings();
 </script>
 </body>
 </html>

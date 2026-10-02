@@ -9,6 +9,9 @@ mod store;
 mod urlutil;
 #[cfg(windows)]
 #[allow(unsafe_code)]
+mod wechat_watch;
+#[cfg(windows)]
+#[allow(unsafe_code)]
 mod winsvc;
 
 use std::env;
@@ -81,6 +84,8 @@ async fn cli_main() -> ExitCode {
             println!("剪藏服务已启动：{origin}");
             println!("文章会保存到：{}", opts.output.display());
             println!("油猴脚本：{origin}/wx-clipper.user.js");
+            #[cfg(windows)]
+            println!("电脑微信里打开的公众号文章会在后台按标签剪藏。");
             if let Err(err) =
                 server::serve(&opts.addr, opts.output, origin, std::future::pending()).await
             {
@@ -252,6 +257,7 @@ fn print_help() {
 
 打开 http://127.0.0.1:17331 查看已保存的文章，并安装油猴脚本。
 浏览器打开公众号或知乎专栏文章时，脚本会把链接发给本机服务。
+在 Windows 上，服务运行时会在后台按标签剪藏电脑微信里打开的公众号文章。
 在 Windows 上，install 会弹出系统授权框，把服务设为开机自启。
 
 环境变量
